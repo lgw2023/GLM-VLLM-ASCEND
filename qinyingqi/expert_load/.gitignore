@@ -1,0 +1,21 @@
+# Node-local configuration. The tracked examples stay in Git.
+/configs/*.env
+/configs/*.env.*
+!/configs/*.env.example
+/configs/remote_npu_ips.txt
+/configs/remote_npu_ips.txt.*
+!/configs/remote_npu_ips.txt.example
+/.client-venv/
+
+# Runtime artifacts and large external working trees.
+/artifacts/*
+!/artifacts/README.md
+/runs/
+/data/
+/benchmarks/repos/
+/benchmarks/cache/
+/**/*.pid
+/**/*.npy
+/**/*.npz
+/**/__pycache__/
+/**/*.py[cod]
