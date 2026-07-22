@@ -1,0 +1,8 @@
+[submodule "upstream/vllm"]
+	path = upstream/vllm
+	url = https://github.com/vllm-project/vllm.git
+	shallow = true
+[submodule "upstream/vllm-ascend"]
+	path = upstream/vllm-ascend
+	url = https://github.com/vllm-project/vllm-ascend.git
+	shallow = true

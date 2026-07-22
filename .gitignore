@@ -1,0 +1,35 @@
+# macOS and editor state
+.DS_Store
+**/.DS_Store
+.idea/
+.vscode/
+
+# Local environments and credentials
+.env
+.env.*
+!.env.example
+.venv/
+venv/
+*.pem
+*.key
+
+# Python and build output
+__pycache__/
+*.py[cod]
+build/
+dist/
+*.egg-info/
+
+# Model and experiment artifacts
+models/
+weights/
+outputs/
+logs/
+*.safetensors
+*.ckpt
+*.pth
+*.pt
+
+# Internal infrastructure documents: intentionally local-only
+docs/INTERNAL_ASCEND_CLUSTER_INVENTORY.md
+docs/内部昇腾服务器详细信息.md
