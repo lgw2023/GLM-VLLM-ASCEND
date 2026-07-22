@@ -29,7 +29,3 @@ logs/
 *.ckpt
 *.pth
 *.pt
-
-# Internal infrastructure documents: intentionally local-only
-docs/INTERNAL_ASCEND_CLUSTER_INVENTORY.md
-docs/内部昇腾服务器详细信息.md

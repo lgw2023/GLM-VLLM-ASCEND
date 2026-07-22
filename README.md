@@ -1,6 +1,6 @@
 # GLM / vLLM Ascend on Atlas A2
 
-本项目用于准备在昇腾 Atlas 800 A2 上运行 GLM-5 与 GLM-5.2，集中保存锁定的上游源码版本、公开部署基线、三人工作目录和共享交流区。
+本项目用于准备在昇腾 Atlas 800 A2 上运行 GLM-5 与 GLM-5.2，集中保存锁定的上游源码版本、部署与服务器基线、三人工作目录和共享交流区。
 
 > 当前状态：已完成文档和源码基线准备，尚未下载模型权重、容器镜像或 Python/CANN 依赖，也尚未在 A2 服务器上完成 GLM 运行验证。
 
@@ -24,6 +24,8 @@ git submodule update --init --recursive
 | 文件 | 职责 |
 | --- | --- |
 | [`docs/A2_DEPLOYMENT_BASELINE.md`](docs/A2_DEPLOYMENT_BASELINE.md) | GLM 模型资源要求、软件版本、上游差异与开工检查清单 |
+| [`docs/INTERNAL_ASCEND_CLUSTER_INVENTORY.md`](docs/INTERNAL_ASCEND_CLUSTER_INVENTORY.md) | 昇腾双节点、共享存储、模型目录和镜像快照 |
+| [`docs/内部昇腾服务器详细信息.md`](docs/内部昇腾服务器详细信息.md) | Atlas A2 服务器硬件、运行时、路径与运维基线 |
 | [`交流区/README.md`](交流区/README.md) | 三人传递需求、交接和共同决策的规则与入口 |
 | [`UPSTREAM.lock`](UPSTREAM.lock) | 可机器核对的仓库、提交、镜像和文档快照锁定值 |
 
@@ -74,4 +76,4 @@ git -C upstream/vllm-ascend show 44fc51ffb18dd05ca53c6509eae0058ba3c39333:docs/s
 
 ## 发布边界
 
-公开仓不包含内部服务器地址、认证信息、模型权重、容器镜像、运行日志或私有基础设施清单。服务器侧验证结果必须先脱敏，再进入 `main`。
+按项目所有者的明确要求，当前公开仓完整纳入 `docs/` 下的三份文档，包括内部服务器地址、主机名、存储路径与运维基线。文档不得包含登录口令、Token、私钥、代理凭据或其他认证材料；模型权重、容器镜像和原始运行日志仍不纳入 Git。
