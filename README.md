@@ -24,7 +24,7 @@ git submodule update --init --recursive
 | 文件 | 职责 |
 | --- | --- |
 | [`docs/A2_DEPLOYMENT_BASELINE.md`](docs/A2_DEPLOYMENT_BASELINE.md) | GLM 模型资源要求、软件版本、上游差异与开工检查清单 |
-| [`docs/交流区/README.md`](docs/交流区/README.md) | 三人传递需求、交接和共同决策的规则与入口 |
+| [`交流区/README.md`](交流区/README.md) | 三人传递需求、交接和共同决策的规则与入口 |
 | [`UPSTREAM.lock`](UPSTREAM.lock) | 可机器核对的仓库、提交、镜像和文档快照锁定值 |
 
 ## 锁定基线
@@ -55,7 +55,9 @@ git submodule update --init --recursive
 | qinyingqi | `qinyingqi/` |
 | yangyinyue | `yangyinyue/` |
 
-三个目录都是普通文件夹，不是 Git worktree，也不包含重复源码。个人方案、脚本、实验记录和待合入成果放在本人目录；每个目录中的 `交流区` 都指向同一个 `docs/交流区/`。
+三个目录都是项目根目录下的普通文件夹，不是 Git worktree，也不包含重复源码。个人方案、脚本、实验记录和待合入成果放在本人目录。
+
+共享的 `交流区/` 同样直接位于项目根目录，并在其下划分 `liguowei/`、`qinyingqi/`、`yangyinyue/` 三个独立交流空间。交流区不再嵌入或链接到个人工作目录。
 
 ## 官方文档
 
