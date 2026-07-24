@@ -7,8 +7,17 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
 load_configs "${1:-}" "${2:-}"
-[[ "${3:-}" == --confirm-pull ]] || \
-    die "image pull can consume substantial DockerRootDir space; rerun with --confirm-pull"
+case "${3:-}" in
+    --confirm-pull)
+        IMAGE_ACTION=pull
+        ;;
+    --confirm-existing-image)
+        IMAGE_ACTION=verify-existing
+        ;;
+    *)
+        die "rerun with --confirm-pull, or use --confirm-existing-image after an audited docker load"
+        ;;
+esac
 require_cmd date
 require_cmd docker
 require_cmd sha256sum
@@ -25,12 +34,18 @@ mkdir -p "${OUT_DIR}"
 exec > >(tee "${OUT_DIR}/pull.log") 2>&1
 
 printf 'image_ref=%s\n' "${IMAGE_REF}"
+printf 'image_action=%s\n' "${IMAGE_ACTION}"
 printf 'before_pull:\n'
 docker image inspect "${IMAGE_REF}" \
     --format 'id={{.Id}} repo_digests={{json .RepoDigests}} created={{.Created}}' \
     2>/dev/null || true
 
-docker pull "${IMAGE_REF}"
+if [[ "${IMAGE_ACTION}" == pull ]]; then
+    docker pull "${IMAGE_REF}"
+else
+    docker image inspect "${IMAGE_REF}" >/dev/null 2>&1 || \
+        die "image is not present locally: ${IMAGE_REF}"
+fi
 
 printf 'after_pull:\n'
 image_metadata | tee "${OUT_DIR}/image.identity"
@@ -47,7 +62,7 @@ mkdir -p "${GATE_DIR}"
     printf 'packages_sha256=%s\n' "$(sha256sum "${OUT_DIR}/packages.txt" | awk '{print $1}')"
     printf 'capture_patch_id=%s\n' "$(image_capture_patch_id)"
     printf 'cluster_config_sha256=%s\n' "$(cluster_config_sha256)"
-    printf 'root_commit=%s\n' "$(root_commit)"
+    printf 'source_id=%s\n' "$(source_id)"
     printf 'created_at=%s\n' "$(date --iso-8601=seconds)"
 } >"${GATE_DIR}/image.gate"
 printf 'PULL_OK output=%s gate=%s\n' "${OUT_DIR}" "${GATE_DIR}/image.gate"

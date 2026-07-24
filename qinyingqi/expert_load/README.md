@@ -2,7 +2,7 @@
 
 这是同步到两台 Atlas A2 节点的第一阶段运行包。当前目标是闭合环境、镜像、模型、NPU keep-alive、双节点 HCCL 和 GLM-5.2 vendor smoke；暂不下载完整 benchmark，也不把未打补丁的 W8A8 路由数据当作实验结果。
 
-本目录在 Mac 上只用于 Git 提交和本地单测。下面第 1–10 节命令都应在远端 Ascend 服务器执行；没有任何脚本会在 `git pull` 时自动下载模型、拉镜像、停止 NPU 或启动服务。模型下载还必须显式传入 `--confirm-large-download`。
+Mac 上的可信 Git 工作树只用于 review、生成 source manifest、提交和本地单测。远端服务器不保留 `.git`：部署包使用逐文件 SHA-256 manifest 和共享配置中的固定 manifest digest 建立源码身份。下面第 2–10 节命令都应在远端 Ascend 服务器执行；部署源码不会自动下载模型、拉镜像、停止 NPU 或启动服务。模型下载还必须显式传入 `--confirm-large-download`。
 
 固定基线：
 
@@ -21,6 +21,7 @@
 configs/      两节点配置模板；真实 IP/NIC 配置不会进入 Git
 scripts/      预检、HCCN/HCCL、模型、启动、请求、停服与恢复脚本
 tests/        route response 和模型分片校验单测
+SOURCE_MANIFEST.json  不依赖 .git 的受管源码逐文件 SHA-256 清单
 patches/      下一阶段 W8A8 route-capture 补丁位置
 benchmarks/   下一阶段 benchmark 固定版本与适配器位置
 BASELINE.md   实验口径和 20%/90% 判定定义
@@ -29,29 +30,40 @@ MODEL_PROVENANCE.md  固定模型 revision、元数据 hash 和字节口径
 
 共享证据写到 `RUN_HOST_ROOT`；NPU 租约、恢复状态和已校验的 keep-alive 脚本副本写到各节点本地的 `LOCAL_STATE_ROOT`。两者都不会写入仓库。脚本不会登录另一台服务器；下面标注“两节点”的步骤需要你在两个 SSH 终端分别执行。
 
-## 1. 两节点拉取代码并配置
+## 1. 生成无 Git 发布包并配置两节点
 
-先在 Mac 上 review、commit 并 push 本目录；未进入 Git 的文件不会被远端 `git pull` 获取。远端已有完整组内仓库时，两台服务器分别执行：
+先在 Mac 的完整、可信 Git 工作树完成代码修改。确认两个上游 submodule 位于 `BASELINE.md` 固定的 commit 且没有本地修改后，在本目录生成 manifest、验证并构建不含 `.git` 的确定性发布包：
 
 ```bash
-cd <REMOTE_GLM_VLLM_ASCEND_REPO_ROOT>
-git pull --ff-only
-git submodule update --init --recursive
-git status --short --branch
-git submodule status
-cd qinyingqi/expert_load
+cd /Users/qyqsmacbookpro/Desktop/GLM-VLLM-ASCEND/qinyingqi/expert_load
+
+python3 scripts/source_manifest.py generate
+python3 scripts/source_manifest.py verify
+python3 scripts/source_manifest.py bundle \
+  --output /tmp/glm52-expert-load-source.tar.gz
+```
+
+`generate` 只允许在本地 Git 工作树运行，并核对两个 submodule 的固定 commit；`verify` 和后续远端脚本完全不需要 Git。记录输出中的 `source_id=sha256:<64-hex>`，把不含 `sha256:` 前缀的 64 位值填入两节点 `configs/cluster.env` 的 `SOURCE_MANIFEST_SHA256`。任何受管文件变化后都必须重新生成 manifest、重新分发整个发布包并重跑门禁。
+
+先 review、commit 并 push 这些源码和 `SOURCE_MANIFEST.json`。再通过获批的传输通道把 `/tmp/glm52-expert-load-source.tar.gz` 传到两个节点。推荐每个 source ID 解压到一个新的发布目录，避免旧文件与新版本混用：
+
+```bash
+mkdir -p <REMOTE_RELEASE_ROOT>
+tar -xzf glm52-expert-load-source.tar.gz -C <REMOTE_RELEASE_ROOT>
+cd <REMOTE_RELEASE_ROOT>/qinyingqi/expert_load
+
+python3 scripts/source_manifest.py verify \
+  --expected-sha256 <SOURCE_MANIFEST_SHA256>
+```
+
+发布包只包含本运行包的受管源码和 manifest，不包含 `.git`、模型、benchmark、运行结果或真实节点配置。首次部署时执行：
+
+```bash
 umask 077
 cp configs/cluster.env.example configs/cluster.env
 ```
 
-如果某台服务器尚未 clone，必须先用组内仓库真实 URL 完整拉取根仓和 submodule，而不是只传 `expert_load/`：
-
-```bash
-git clone --recurse-submodules <GROUP_REPO_GIT_URL> GLM-VLLM-ASCEND
-cd GLM-VLLM-ASCEND/qinyingqi/expert_load
-```
-
-首次 clone 后同样执行上面的 `umask 077`，并从 `configs/cluster.env.example` 创建本地 `configs/cluster.env`。
+升级已有部署时，从旧发布目录复制 `configs/cluster.env`、本节点的 `configs/node.env` 和 `configs/remote_npu_ips.txt`，然后把新的 `SOURCE_MANIFEST_SHA256` 同步写入两节点 `cluster.env`。不要把 node0 的 `node.env` 复制给 node1。
 
 node0 复制：
 
@@ -90,7 +102,7 @@ node1 模板默认通过 `/data/node0_disk2` 使用 node0 导出的共享模型�
 bash scripts/00_preflight.sh configs/cluster.env configs/node.env
 ```
 
-它检查 aarch64、8 个 Davinci 设备、NPU 状态、驱动挂载源、NIC/路由、端口、每卡 HCCN link/health、磁盘、Docker、源码 commit 和 keep-alive 脚本 identity。配置修改后旧门禁自动失效，必须重跑。
+它检查 aarch64、8 个 Davinci 设备、NPU 状态、驱动挂载源、NIC/路由、端口、每卡 HCCN link/health、磁盘、Docker、完整 source manifest 和 keep-alive 脚本 identity。源码或配置修改后旧门禁自动失效，必须重跑。
 
 ## 3. 两节点 HCCN 逐卡网络检查
 
@@ -127,6 +139,13 @@ bash scripts/02_pull_image.sh \
 ```
 
 脚本在 pull 前后检查 DockerRootDir 空间，并记录 image ID、RepoDigest、镜像内实际 package version 和 capture-patch label。两节点 image ID 必须一致；后续启动会强制消费这两个共享门禁。
+
+如果镜像已通过 `docker save`、传输文件 SHA-256、`docker load` 的流程从另一节点导入，不需要再次访问 quay.io；核对本地 `IMAGE_REF` 后用下面的只验证模式重建当前 source ID 对应的 image gate：
+
+```bash
+bash scripts/02_pull_image.sh \
+  configs/cluster.env configs/node.env --confirm-existing-image
+```
 
 ## 5. node0 下载并验证模型
 
@@ -282,9 +301,13 @@ bash scripts/20_restore_npus.sh configs/cluster.env configs/node.env
 ## push 前本地验证
 
 ```bash
+python3 scripts/source_manifest.py generate
+python3 scripts/source_manifest.py verify
 bash -n scripts/*.sh scripts/lib/*.sh
 .client-venv/bin/python -m unittest discover -s tests -v
 git -C ../.. status --short --ignored -- qinyingqi/expert_load
+python3 scripts/source_manifest.py bundle \
+  --output /tmp/glm52-expert-load-source.tar.gz
 ```
 
-需要提交的是本目录中的 tracked 模板、脚本和文档；不要提交 `configs/cluster.env`、`configs/node.env`、`configs/remote_npu_ips.txt`、模型、运行日志、response 或 `.npy` route 数据。
+需要提交的是本目录中的 tracked 模板、脚本、文档和 `SOURCE_MANIFEST.json`；不要提交 `configs/cluster.env`、`configs/node.env`、`configs/remote_npu_ips.txt`、模型、运行日志、response 或 `.npy` route 数据。生成 manifest 后不要再修改受管文件；如有修改，重新运行 `generate`。

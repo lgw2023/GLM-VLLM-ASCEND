@@ -13,7 +13,6 @@ require_cmd df
 require_cmd docker
 require_cmd free
 require_cmd findmnt
-require_cmd git
 require_cmd ip
 require_cmd lscpu
 require_cmd mv
@@ -169,16 +168,8 @@ for info_file in \
     fi
 done
 
-printf '\n[git]\n'
-git -C "${REPO_ROOT}" status --short --branch
-git -C "${REPO_ROOT}" rev-parse HEAD
-git -C "${REPO_ROOT}" submodule status
-[[ "$(git -C "${REPO_ROOT}/upstream/vllm" rev-parse HEAD)" == \
-   0decac0d96c42b49572498019f0a0e3600f50398 ]] || die "vLLM submodule is not at the locked commit"
-[[ "$(git -C "${REPO_ROOT}/upstream/vllm-ascend" rev-parse HEAD)" == \
-   5f6faa0cb8830f667266f3b8121cd1383606f2a1 ]] || die "vLLM-Ascend submodule is not at the locked commit"
-[[ -z "$(git -C "${REPO_ROOT}" status --porcelain --untracked-files=no)" ]] || \
-    die "tracked group-repo files are modified"
+printf '\n[source manifest]\n'
+verify_source_manifest
 
 printf '\n[keep-alive script identities]\n'
 for keepalive_var in KEEPALIVE_STOP_SCRIPT KEEPALIVE_START_SCRIPT; do

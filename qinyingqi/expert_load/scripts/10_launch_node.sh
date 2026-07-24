@@ -270,9 +270,7 @@ fi
     printf 'image_capture_patch_id=%s\n' "${IMAGE_PATCH_ID}"
     printf 'model_id=%s\n' "${MODEL_ID}"
     printf 'model_revision=%s\n' "${MODEL_REVISION}"
-    printf 'root_commit=%s\n' "$(git -C "${REPO_ROOT}" rev-parse HEAD)"
-    printf 'vllm_commit=%s\n' "$(git -C "${REPO_ROOT}/upstream/vllm" rev-parse HEAD)"
-    printf 'vllm_ascend_commit=%s\n' "$(git -C "${REPO_ROOT}/upstream/vllm-ascend" rev-parse HEAD)"
+    source_identity_metadata
     image_metadata
 } >"${RUN_DIR}/launch.metadata"
 write_shell_command "${RUN_DIR}/launch.command.sh" \

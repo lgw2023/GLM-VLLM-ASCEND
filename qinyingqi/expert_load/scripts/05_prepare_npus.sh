@@ -114,7 +114,7 @@ mkdir "${LEASE_PENDING_DIR}"
     printf 'owner_pid=%s\n' "$$"
     printf 'acquired_at=%s\n' "$(date --iso-8601=seconds)"
     printf 'cluster_config_sha256=%s\n' "$(cluster_config_sha256)"
-    printf 'root_commit=%s\n' "$(root_commit)"
+    printf 'source_id=%s\n' "$(source_id)"
 } >"${LEASE_PENDING_DIR}/owner.env"
 if ! mv -T "${LEASE_PENDING_DIR}" "${LEASE_DIR}" 2>/dev/null; then
     mv -T "${LEASE_PENDING_DIR}" \

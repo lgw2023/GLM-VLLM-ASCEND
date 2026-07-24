@@ -4,6 +4,10 @@ set -Eeuo pipefail
 
 EXPERT_LOAD_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 REPO_ROOT="$(cd "${EXPERT_LOAD_ROOT}/../.." && pwd)"
+SOURCE_MANIFEST_PATH="${EXPERT_LOAD_ROOT}/SOURCE_MANIFEST.json"
+SOURCE_MANIFEST_TOOL="${EXPERT_LOAD_ROOT}/scripts/source_manifest.py"
+VLLM_SOURCE_LOCK=0decac0d96c42b49572498019f0a0e3600f50398
+VLLM_ASCEND_SOURCE_LOCK=5f6faa0cb8830f667266f3b8121cd1383606f2a1
 
 die() {
     printf 'ERROR: %s\n' "$*" >&2
@@ -70,7 +74,8 @@ load_configs() {
 
 validate_config() {
     local required=(
-        CLUSTER_NAME NODE0_COORDINATOR_IP MODEL_ID MODEL_REVISION MODEL_CONTAINER_PATH
+        CLUSTER_NAME NODE0_COORDINATOR_IP SOURCE_MANIFEST_SHA256
+        MODEL_ID MODEL_REVISION MODEL_CONTAINER_PATH
         RUN_PROFILE IMAGE_REF ENABLE_ROUTE_CAPTURE SERVED_MODEL_NAME API_PORT DP_RPC_PORT
         EXPECTED_VLLM_PACKAGE_VERSION EXPECTED_VLLM_ASCEND_PACKAGE_VERSION CAPTURE_PATCH_ID
         HCCL_TEST_PORT HCCL_TEST_TIMEOUT_SECONDS
@@ -126,6 +131,8 @@ validate_config() {
         die "MODEL_CONTAINER_PATH must be an absolute, non-root path"
     [[ "${MODEL_REVISION}" =~ ^[0-9a-f]{40}$ ]] || \
         die "MODEL_REVISION must be a pinned lowercase 40-character commit SHA"
+    [[ "${SOURCE_MANIFEST_SHA256}" =~ ^[0-9a-f]{64}$ ]] || \
+        die "SOURCE_MANIFEST_SHA256 must be a lowercase SHA-256"
     if [[ "${RUN_PROFILE}" == vendor_smoke ]]; then
         [[ "${CAPTURE_PATCH_ID}" == none ]] || \
             die "vendor_smoke requires CAPTURE_PATCH_ID=none"
@@ -197,8 +204,28 @@ cluster_config_sha256() {
     sha256sum "${CLUSTER_CONFIG_PATH}" | awk '{print $1}'
 }
 
-root_commit() {
-    git -C "${REPO_ROOT}" rev-parse HEAD
+verify_source_manifest() {
+    require_cmd python3
+    [[ -f "${SOURCE_MANIFEST_TOOL}" ]] || \
+        die "source manifest verifier is missing: ${SOURCE_MANIFEST_TOOL}"
+    [[ -f "${SOURCE_MANIFEST_PATH}" ]] || \
+        die "source manifest is missing: ${SOURCE_MANIFEST_PATH}"
+    python3 "${SOURCE_MANIFEST_TOOL}" verify \
+        --package-root "${EXPERT_LOAD_ROOT}" \
+        --manifest "${SOURCE_MANIFEST_PATH}" \
+        --expected-sha256 "${SOURCE_MANIFEST_SHA256}" "$@"
+}
+
+source_id() {
+    verify_source_manifest --quiet
+    printf 'sha256:%s\n' "${SOURCE_MANIFEST_SHA256}"
+}
+
+source_identity_metadata() {
+    printf 'source_id=%s\n' "$(source_id)"
+    printf 'source_manifest_sha256=%s\n' "${SOURCE_MANIFEST_SHA256}"
+    printf 'vllm_source_lock=%s\n' "${VLLM_SOURCE_LOCK}"
+    printf 'vllm_ascend_source_lock=%s\n' "${VLLM_ASCEND_SOURCE_LOCK}"
 }
 
 image_capture_patch_id() {
@@ -229,8 +256,9 @@ package_version_from_file() {
 }
 
 require_cluster_image_gate() {
-    local current_id
+    local current_id current_source_id
     current_id="$(current_image_id)"
+    current_source_id="$(source_id)"
     local rank gate_file gate_ref gate_id
     for rank in 0 1; do
         gate_file="${RUN_HOST_ROOT}/gates/node${rank}/image.gate"
@@ -242,14 +270,15 @@ require_cluster_image_gate() {
             die "node${rank} image ID differs from local image ID; repull the same immutable image"
         [[ "$(gate_value cluster_config_sha256 "${gate_file}")" == "$(cluster_config_sha256)" ]] || \
             die "node${rank} image gate used a different cluster.env"
-        [[ "$(gate_value root_commit "${gate_file}")" == "$(root_commit)" ]] || \
-            die "node${rank} image gate used a different group-repo commit"
+        [[ "$(gate_value source_id "${gate_file}")" == "${current_source_id}" ]] || \
+            die "node${rank} image gate used a different source manifest"
     done
 }
 
 require_cluster_hccl_gate() {
-    local current_id
+    local current_id current_source_id
     current_id="$(current_image_id)"
+    current_source_id="$(source_id)"
     local rank gate_file
     for rank in 0 1; do
         gate_file="${RUN_HOST_ROOT}/${RUN_ID}/node${rank}/hccl-collective/HCCL_COLLECTIVE_OK"
@@ -263,8 +292,8 @@ require_cluster_hccl_gate() {
             die "node${rank} HCCL gate used a different image ID"
         [[ "$(gate_value cluster_config_sha256 "${gate_file}")" == "$(cluster_config_sha256)" ]] || \
             die "node${rank} HCCL gate used a different cluster.env"
-        [[ "$(gate_value root_commit "${gate_file}")" == "$(root_commit)" ]] || \
-            die "node${rank} HCCL gate used a different group-repo commit"
+        [[ "$(gate_value source_id "${gate_file}")" == "${current_source_id}" ]] || \
+            die "node${rank} HCCL gate used a different source manifest"
         if [[ "${rank}" == "${NODE_RANK}" ]]; then
             [[ "$(gate_value config_fingerprint "${gate_file}")" == "$(config_fingerprint)" ]] || \
                 die "local HCCL gate was created for different config contents"
@@ -296,7 +325,7 @@ write_config_gate() {
         printf 'created_at=%s\n' "$(date --iso-8601=seconds)"
         printf 'config_fingerprint=%s\n' "$(config_fingerprint)"
         printf 'cluster_config_sha256=%s\n' "$(cluster_config_sha256)"
-        printf 'root_commit=%s\n' "$(root_commit)"
+        printf 'source_id=%s\n' "$(source_id)"
     } >"${destination}"
     printf '%s\n' "${destination}"
 }
@@ -317,6 +346,8 @@ require_config_gate() {
     current="$(config_fingerprint)"
     [[ -n "${recorded}" && "${recorded}" == "${current}" ]] || \
         die "${gate_name} gate was created for different config contents; rerun it"
+    [[ "$(gate_value source_id "${gate_file}")" == "$(source_id)" ]] || \
+        die "${gate_name} gate was created for a different source manifest; rerun it"
 }
 
 model_download_state_file() {
