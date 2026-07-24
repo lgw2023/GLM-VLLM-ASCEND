@@ -6,49 +6,37 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/common.sh
 source "${SCRIPT_DIR}/lib/common.sh"
 
-CLUSTER_CONFIG_ARG="${1:-}"
-NODE_CONFIG_ARG="${2:-}"
-load_configs "${CLUSTER_CONFIG_ARG}" "${NODE_CONFIG_ARG}"
+load_configs "${1:-}" "${2:-}"
 require_run_id
-require_cmd docker
 require_cmd date
+require_cmd docker
 require_cmd python3
 require_cmd ss
 require_cmd tee
 require_cmd timeout
+require_config_gate preflight
+require_config_gate hccn_ping
+require_cluster_image_gate
+require_npu_ready
 
 umask 077
 RUN_DIR="$(host_run_dir)"
 OUT_DIR="${RUN_DIR}/hccl-collective"
-mkdir -p "${OUT_DIR}"
 CONTAINER_NAME="glm52-hccl-node${NODE_RANK}-${RUN_ID}"
-acquire_lifecycle_lock hccl
-trap 'release_lifecycle_lock' EXIT
-trap 'exit 130' INT
-trap 'exit 143' TERM
-KEEPALIVE_STATE="$(keepalive_state_file)"
-[[ -f "${KEEPALIVE_STATE}" ]] || die "run 05_prepare_npus.sh first"
-[[ "$(gate_value status "${KEEPALIVE_STATE}")" == PREPARED ]] || \
-    die "keep-alive state must be PREPARED before HCCL collective test"
-[[ "$(gate_value run_id "${KEEPALIVE_STATE}")" == "${RUN_ID}" ]] || \
-    die "keep-alive state belongs to another run"
-[[ "$(gate_value node_rank "${KEEPALIVE_STATE}")" == "${NODE_RANK}" ]] || \
-    die "keep-alive state belongs to another node"
-[[ "$(gate_value stopped_card_ids "${KEEPALIVE_STATE}")" == 0,1,2,3,4,5,6,7 ]] || \
-    die "keep-alive state does not cover exactly cards 0..7"
-require_run_npu_lease
+mkdir -p "${OUT_DIR}"
 
 container_exists "${CONTAINER_NAME}" && \
     die "HCCL test container already exists: ${CONTAINER_NAME}"
 [[ ! -e "${RUN_DIR}/launch.started" && \
    ! -e "$(local_run_dir)/service/launch.started" ]] || \
-    die "model launch already started for this RUN_ID; HCCL gate may not be rerun"
-RUNNING_NPU_CONTAINERS="$(running_npu_container_ids)"
-[[ -z "${RUNNING_NPU_CONTAINERS}" ]] || \
-    die "refusing HCCL gate while NPU containers are running: ${RUNNING_NPU_CONTAINERS}"
+    die "model launch already started for this RUN_ID; choose a new RUN_ID"
+
+if [[ "${NODE_RANK}" == 0 ]] && ss -H -ltn "sport = :${HCCL_TEST_PORT}" | grep -q .; then
+    die "HCCL_TEST_PORT=${HCCL_TEST_PORT} is already in use"
+fi
 
 INVOCATION_ID="hccl-node${NODE_RANK}-$(date -u +%Y%m%dT%H%M%S)-$$-${RANDOM}"
-HCCL_ATTEMPTED=0
+COLLECTIVE_SUCCEEDED=0
 
 container_owned_by_invocation() {
     container_exists "${CONTAINER_NAME}" || return 1
@@ -57,61 +45,32 @@ container_owned_by_invocation() {
        "${INVOCATION_ID}" ]]
 }
 
-COLLECTIVE_SUCCEEDED=0
-restore_after_collective_failure() {
+cleanup_collective_failure() {
     local exit_status=$?
-    local cleanup_signal_status=0
-    trap - EXIT
-    trap 'cleanup_signal_status=130' INT
-    trap 'cleanup_signal_status=143' TERM
+    trap - EXIT INT TERM
     if (( exit_status != 0 && COLLECTIVE_SUCCEEDED == 0 )); then
-        local safe_to_restore=1 running_consumers
-        if (( HCCL_ATTEMPTED == 1 )) && \
-           container_owned_by_invocation && container_is_running "${CONTAINER_NAME}"; then
-            docker stop -t 30 "${CONTAINER_NAME}" || true
+        if container_owned_by_invocation; then
+            if container_is_running "${CONTAINER_NAME}"; then
+                docker stop -t 30 "${CONTAINER_NAME}" >/dev/null 2>&1 || true
+            fi
+            docker inspect "${CONTAINER_NAME}" \
+                >"${OUT_DIR}/container.failed.inspect.json" 2>/dev/null || true
+            docker logs --timestamps "${CONTAINER_NAME}" \
+                >"${OUT_DIR}/container.failed.log" 2>&1 || true
+            docker rm "${CONTAINER_NAME}" >/dev/null 2>&1 || true
         fi
-        if container_owned_by_invocation && container_is_running "${CONTAINER_NAME}"; then
-            safe_to_restore=0
-        fi
-        if ! running_consumers="$(running_npu_container_ids)"; then
-            warn "NPU consumer scan failed; keep-alive will not be restored"
-            safe_to_restore=0
-        elif [[ -n "${running_consumers}" ]]; then
-            safe_to_restore=0
-        fi
-        if (( safe_to_restore == 1 )); then
-            warn "HCCL gate failed locally; restoring keep-alive on node${NODE_RANK}"
-            bash "${SCRIPT_DIR}/20_restore_npus.sh" \
-                "${CLUSTER_CONFIG_ARG}" "${NODE_CONFIG_ARG}" || true
-        else
-            warn "HCCL container is still running; keep-alive was NOT restored to avoid an NPU conflict"
-        fi
+        warn "HCCL test failed on node${NODE_RANK}; stop the peer HCCL command if it is still waiting"
     fi
-    release_lifecycle_lock || true
-    (( cleanup_signal_status == 0 )) || exit_status=${cleanup_signal_status}
     exit "${exit_status}"
 }
-trap restore_after_collective_failure EXIT
+trap cleanup_collective_failure EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
-
-[[ "${NPU_LAUNCH_CONFIRMATION:-}" == "${RUN_ID}" ]] || \
-    die "export NPU_LAUNCH_CONFIRMATION=${RUN_ID} after the per-run occupancy check"
-require_config_gate preflight
-require_config_gate hccn_ping
-require_cluster_image_gate
-if [[ "${NODE_RANK}" == 0 ]] && ss -H -ltn "sport = :${HCCL_TEST_PORT}" | grep -q .; then
-    die "HCCL_TEST_PORT=${HCCL_TEST_PORT} is already in use"
-fi
-
-python3 "${SCRIPT_DIR}/keepalive_state.py" snapshot \
-    --output "${OUT_DIR}/keepalive-before-hccl.json"
-python3 "${SCRIPT_DIR}/keepalive_state.py" validate --expected stopped \
-    "${OUT_DIR}/keepalive-before-hccl.json"
 
 NPU_SMI_HOST_BIN="$(resolve_binary npu-smi /usr/local/bin/npu-smi /usr/local/sbin/npu-smi)"
 HCCN_TOOL_HOST_BIN="$(resolve_binary hccn_tool /usr/local/Ascend/driver/tools/hccn_tool)"
 "${NPU_SMI_HOST_BIN}" info | tee "${OUT_DIR}/npu-smi-before-hccl.txt"
+
 DOCKER_ARGS=(
     docker run
     --name "${CONTAINER_NAME}"
@@ -162,27 +121,14 @@ write_shell_command "${OUT_DIR}/command.sh" \
     timeout --foreground --kill-after=30 "${HCCL_TEST_TIMEOUT_SECONDS}s" \
     "${DOCKER_ARGS[@]}" "${IMAGE_REF}" "${COLLECTIVE_ARGS[@]}"
 
-require_no_npu_containers "HCCL container launch"
 set +e
-HCCL_ATTEMPTED=1
 timeout --foreground --kill-after=30 "${HCCL_TEST_TIMEOUT_SECONDS}s" \
     "${DOCKER_ARGS[@]}" "${IMAGE_REF}" "${COLLECTIVE_ARGS[@]}" \
     2>&1 | tee "${OUT_DIR}/collective.log"
 COLLECTIVE_STATUS=${PIPESTATUS[0]}
 set -e
-
-if (( COLLECTIVE_STATUS != 0 )); then
-    if container_owned_by_invocation; then
-        if container_is_running "${CONTAINER_NAME}"; then
-            docker stop -t 30 "${CONTAINER_NAME}" || true
-        fi
-        docker inspect "${CONTAINER_NAME}" >"${OUT_DIR}/container.failed.inspect.json" 2>/dev/null || true
-        docker logs --timestamps "${CONTAINER_NAME}" >"${OUT_DIR}/container.failed.log" 2>&1 || true
-    elif container_exists "${CONTAINER_NAME}"; then
-        warn "same-name container is not owned by this HCCL invocation; leaving it untouched"
-    fi
-    die "HCCL collective gate failed with status ${COLLECTIVE_STATUS}; stop/recover the peer node"
-fi
+(( COLLECTIVE_STATUS == 0 )) || \
+    die "HCCL collective gate failed with status ${COLLECTIVE_STATUS}"
 
 container_owned_by_invocation || \
     die "completed HCCL container is missing or has the wrong invocation label"
@@ -199,8 +145,8 @@ docker rm "${CONTAINER_NAME}"
     printf 'source_id=%s\n' "$(source_id)"
     printf 'completed_at=%s\n' "$(date --iso-8601=seconds)"
 } >"${OUT_DIR}/HCCL_COLLECTIVE_OK"
+
 COLLECTIVE_SUCCEEDED=1
-release_lifecycle_lock
 trap - EXIT INT TERM
 printf 'HCCL_COLLECTIVE_OK run_id=%s node=%s output=%s\n' \
     "${RUN_ID}" "${NODE_RANK}" "${OUT_DIR}"

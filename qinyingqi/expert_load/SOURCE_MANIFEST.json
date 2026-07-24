@@ -6,9 +6,9 @@
       "sha256": "01f7134c1a6bb8ddaa95aa6eb8755bbfdc9823100a1596bcfac1c8fa27686ff0"
     },
     {
-      "bytes": 4223,
+      "bytes": 4062,
       "path": "BASELINE.md",
-      "sha256": "0f22c2d63573254cae715077c267369c34f3080a9268ac08004801f2305f929c"
+      "sha256": "f9dec4a4e4469ab3331756d23d07b3bc4e7e11906005219134e1c4c6cde6aef0"
     },
     {
       "bytes": 1857,
@@ -16,14 +16,14 @@
       "sha256": "20e4c9d2f30bb657286b53ca4aa6f50de1e59322bbdf1847d1d337e43488c297"
     },
     {
-      "bytes": 16369,
+      "bytes": 6339,
       "path": "README.md",
-      "sha256": "f2e63b5a007de9f2f5c1c6852d9dc638b2d0be0d3034b9f1a7de90b4947d2e02"
+      "sha256": "3720b5348c82ffcd285743f8677a29a9d9b3094db3e4d952f236c69c3c63c77f"
     },
     {
-      "bytes": 329,
+      "bytes": 269,
       "path": "artifacts/README.md",
-      "sha256": "f97178ef9de39e165934bd81ec78c216902305f7a5aac473c07eb0bb237299e6"
+      "sha256": "6e5ceb9b761b4b41f4686b40787dcd08fffae19d117a7c68f5c1885a182fe511"
     },
     {
       "bytes": 489,
@@ -36,14 +36,14 @@
       "sha256": "88230eae424625e639b4a3d76cb7433a344f31473b8febcaa375b9003cba75ce"
     },
     {
-      "bytes": 763,
+      "bytes": 433,
       "path": "configs/node0.env.example",
-      "sha256": "8fbe458302993db5d76cdf8a3b85c67c602ef64dcd95e5b94a6d21ca30203f78"
+      "sha256": "c9eb4172c06d607153437616779d8ae439dc05c7c76631bc146ff078c5e02b29"
     },
     {
-      "bytes": 838,
+      "bytes": 508,
       "path": "configs/node1.env.example",
-      "sha256": "79f1da9fba17bed1c460d534471acdce73d9f493b8998d77cbfeb99e98d7d241"
+      "sha256": "2780d92d01a1cb23b34abe8fd8fe08043722acc20eb50283733ed99df1defc61"
     },
     {
       "bytes": 251,
@@ -61,9 +61,9 @@
       "sha256": "c2bb672e4f2b3f0dd7c8b0c956fb758856a1ffc923722c9f7557645053760082"
     },
     {
-      "bytes": 6960,
+      "bytes": 6450,
       "path": "scripts/00_preflight.sh",
-      "sha256": "a0d0044a109e9f7dc1b47c91b010bd239a0a6db3564f01e6428e77c13dbb33de"
+      "sha256": "62c8a528d1f00cca7c7bdb56caeadcf7286256c4363a34676f9ea709996e7df3"
     },
     {
       "bytes": 1703,
@@ -86,24 +86,24 @@
       "sha256": "af6e084675f97e9f9ca41cf7accf9bcee91ff42ff055dbd3c7a8f8ca20ba8023"
     },
     {
-      "bytes": 10698,
+      "bytes": 1467,
       "path": "scripts/05_prepare_npus.sh",
-      "sha256": "30af04ca1c73d24cdbb0f97f4dd45c93d7f02f32a647d90b13cb85051bda9239"
+      "sha256": "892860be399b767c0f3c4c7eb902aa2a9152c23b1b5458617594edfb04dae2a0"
     },
     {
-      "bytes": 8490,
+      "bytes": 5799,
       "path": "scripts/06_hccl_collective.sh",
-      "sha256": "8982fd07ed9f02098b03b48adb5070cc513a1fdd9fb7fc0da0f3abab99557434"
+      "sha256": "0e03ea79338eba158b3fc891a1c1ba8bc3e3c40d1a601217348835187155f7fc"
     },
     {
-      "bytes": 13336,
+      "bytes": 11353,
       "path": "scripts/10_launch_node.sh",
-      "sha256": "467216bd0f1c59fa849b13f9c50029cd86c0d5f854090fdb6fd3b49fe67e2f02"
+      "sha256": "616635937629e74ad3758798b52603f56b9a6095269666beed25c1a57946a7de"
     },
     {
-      "bytes": 3068,
+      "bytes": 3062,
       "path": "scripts/11_wait_ready.sh",
-      "sha256": "ebcf89159a35e00d5455a5bd0bedf02d151b77f57b26553954545d8f37e165fe"
+      "sha256": "dc1ef33b1a01834933bf453c93a8b91e8dc8ec6879286814dfc3feffe4a28b82"
     },
     {
       "bytes": 24475,
@@ -111,14 +111,9 @@
       "sha256": "c48f96724d378e5a6139ab4069479cbcb5b18f1cf31793cdd1de7fe296b34504"
     },
     {
-      "bytes": 6056,
+      "bytes": 4284,
       "path": "scripts/19_stop_node.sh",
-      "sha256": "b96ad825e49601bec7e7d1c71e63ebfbdf654bd6172d21c0708e69a1f2fb56ad"
-    },
-    {
-      "bytes": 7692,
-      "path": "scripts/20_restore_npus.sh",
-      "sha256": "9f36578ceb13a4eff15af489265995142ecec18e4e6219685778aca62bf736b7"
+      "sha256": "9427ce7e765c2eaaf22c8ef0e01de9872450edb7fd0e7ab48d11aed41828c67b"
     },
     {
       "bytes": 2713,
@@ -126,19 +121,14 @@
       "sha256": "552ad37faeb6d665c9e182405667122fee18f6bbe8efe2edee53975cfc9a945e"
     },
     {
-      "bytes": 5341,
-      "path": "scripts/keepalive_state.py",
-      "sha256": "f03a3851bbdf643490ba64dba6f1f4b9653765f089a172d365ecfdda98f1c68a"
-    },
-    {
-      "bytes": 20144,
+      "bytes": 16993,
       "path": "scripts/lib/common.sh",
-      "sha256": "d7d4ac7c569ff8e2d7ef688925ca78de7056f622a2c0d52beb98f299ea6f26b0"
+      "sha256": "559c6079b077cfe010508d3605e03da7e0016784dc2ccba6c0f6ea8b407fc468"
     },
     {
-      "bytes": 18744,
+      "bytes": 19174,
       "path": "scripts/source_manifest.py",
-      "sha256": "f9d8cdf0ced85e16d123052c96b064d5aacbacc380bb9e0ff4bc381fe3688ad8"
+      "sha256": "27535bdd81435fbc6cf6fdb5a0c04c461712eb99473dc465d4cdeee81e60e9d8"
     },
     {
       "bytes": 13244,
@@ -151,9 +141,9 @@
       "sha256": "809bd3bd353593b1ba901970d6d9422ecaff7a0e661739a542204b3e367d7579"
     },
     {
-      "bytes": 4328,
+      "bytes": 6069,
       "path": "tests/test_source_manifest.py",
-      "sha256": "0d0c801ac7545fb2227d529d6e8d11a0d4e2b6eaf344739bf8686caaa6489504"
+      "sha256": "8c5184e6f5e6d04ae6fe60cce6954cf017e13bcb752425d87554f613b65a7e22"
     },
     {
       "bytes": 7726,

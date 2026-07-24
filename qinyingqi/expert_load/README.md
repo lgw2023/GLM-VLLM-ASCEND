@@ -1,241 +1,171 @@
-# GLM-5.2 Expert Load on Ascend A2
+# GLM-5.2 expert-load on Ascend A2
 
-这是同步到两台 Atlas A2 节点的第一阶段运行包。当前目标是闭合环境、镜像、模型、NPU keep-alive、双节点 HCCL 和 GLM-5.2 vendor smoke；暂不下载完整 benchmark，也不把未打补丁的 W8A8 路由数据当作实验结果。
+本目录用于在两台 Atlas 800 A2（每台 8 张 Ascend NPU）上启动
+`Eco-Tech/GLM-5.2-w8a8`，验证双节点 HCCL，并为后续 expert 路由采集和
+benchmark 实验提供运行入口。
 
-Mac 上的可信 Git 工作树只用于 review、生成 source manifest、提交和本地单测。远端服务器不保留 `.git`：部署包使用逐文件 SHA-256 manifest 和共享配置中的固定 manifest digest 建立源码身份。下面第 2–10 节命令都应在远端 Ascend 服务器执行；部署源码不会自动下载模型、拉镜像、停止 NPU 或启动服务。模型下载还必须显式传入 `--confirm-large-download`。
+所有远端命令都使用 Ascend 原生组件：`npu-smi`、`hccn_tool`、HCCL、
+`torch-npu` 和 `/dev/davinci*`。不要替换成 CUDA、NCCL 或 NVIDIA 命令。
 
-固定基线：
+## 运行原则
 
-- 2 nodes × 8 Ascend 910B1（64 GiB HBM/卡）；
-- `Eco-Tech/GLM-5.2-w8a8`；
-- global DP2、local DP1、TP8、EP enabled；
-- 组内 vLLM `0.22.1` 与 vLLM-Ascend `0.22.1rc1`；
-- vendor smoke 镜像 `quay.io/ascend/vllm-ascend:glm5.2`；
-- node0 提供 API，node1 只运行 headless DP worker。
+- 服务器上的 NPU 占用由操作者手工管理，本项目不会调用服务器维护脚本。
+- 执行步骤 05 前，操作者自行用 `npu-smi info` 确认 0–7 卡可用。
+- 旧调试轮次产生的本地状态目录不再参与启动，也不需要删除。
+- 模型、镜像和 benchmark 数据只放远端服务器，不下载到 Mac。
+- 两台节点必须使用相同 `RUN_ID`、相同镜像 ID 和相同模型路径。
 
-所有脚本仅使用 Ascend 原生组件：`npu-smi`、`hccn_tool`、HCCL、CANN、`torch-npu` 和 `/dev/davinci*`。不要替换成 CUDA、NCCL 或 NVIDIA 命令。
+## 1. 发布无 Git 源码包
 
-## 目录内容
-
-```text
-configs/      两节点配置模板；真实 IP/NIC 配置不会进入 Git
-scripts/      预检、HCCN/HCCL、模型、启动、请求、停服与恢复脚本
-tests/        route response 和模型分片校验单测
-SOURCE_MANIFEST.json  不依赖 .git 的受管源码逐文件 SHA-256 清单
-patches/      下一阶段 W8A8 route-capture 补丁位置
-benchmarks/   下一阶段 benchmark 固定版本与适配器位置
-BASELINE.md   实验口径和 20%/90% 判定定义
-MODEL_PROVENANCE.md  固定模型 revision、元数据 hash 和字节口径
-```
-
-共享证据写到 `RUN_HOST_ROOT`；NPU 租约、恢复状态和已校验的 keep-alive 脚本副本写到各节点本地的 `LOCAL_STATE_ROOT`。两者都不会写入仓库。脚本不会登录另一台服务器；下面标注“两节点”的步骤需要你在两个 SSH 终端分别执行。
-
-## 1. 生成无 Git 发布包并配置两节点
-
-先在 Mac 的完整、可信 Git 工作树完成代码修改。确认两个上游 submodule 位于 `BASELINE.md` 固定的 commit 且没有本地修改后，在本目录生成 manifest、验证并构建不含 `.git` 的确定性发布包：
+服务器禁止保存 `.git`。在 Mac 的完整 Git 工作树中执行：
 
 ```bash
-cd /Users/qyqsmacbookpro/Desktop/GLM-VLLM-ASCEND/qinyingqi/expert_load
-
+cd qinyingqi/expert_load
 python3 scripts/source_manifest.py generate
 python3 scripts/source_manifest.py verify
 python3 scripts/source_manifest.py bundle \
   --output /tmp/glm52-expert-load-source.tar.gz
+
+sha256sum SOURCE_MANIFEST.json
+sha256sum /tmp/glm52-expert-load-source.tar.gz
 ```
 
-`generate` 只允许在本地 Git 工作树运行，并核对两个 submodule 的固定 commit；`verify` 和后续远端脚本完全不需要 Git。记录输出中的 `source_id=sha256:<64-hex>`，把不含 `sha256:` 前缀的 64 位值填入两节点 `configs/cluster.env` 的 `SOURCE_MANIFEST_SHA256`。任何受管文件变化后都必须重新生成 manifest、重新分发整个发布包并重跑门禁。
+把压缩包传到两台服务器并从 `GLM-VLLM-ASCEND` 根目录解压。不要传模型、
+benchmark 数据、运行日志或真实配置文件。
 
-先 review、commit 并 push 这些源码和 `SOURCE_MANIFEST.json`。再通过获批的传输通道把 `/tmp/glm52-expert-load-source.tar.gz` 传到两个节点。推荐每个 source ID 解压到一个新的发布目录，避免旧文件与新版本混用：
+将 `SOURCE_MANIFEST.json` 的 SHA-256 填到两节点相同的
+`configs/cluster.env`：
 
 ```bash
-mkdir -p <REMOTE_RELEASE_ROOT>
-tar -xzf glm52-expert-load-source.tar.gz -C <REMOTE_RELEASE_ROOT>
-cd <REMOTE_RELEASE_ROOT>/qinyingqi/expert_load
-
-python3 scripts/source_manifest.py verify \
-  --expected-sha256 <SOURCE_MANIFEST_SHA256>
+SOURCE_MANIFEST_SHA256=<64位小写SHA-256>
 ```
 
-发布包只包含本运行包的受管源码和 manifest，不包含 `.git`、模型、benchmark、运行结果或真实节点配置。首次部署时执行：
-
-```bash
-umask 077
-cp configs/cluster.env.example configs/cluster.env
-```
-
-升级已有部署时，从旧发布目录复制 `configs/cluster.env`、本节点的 `configs/node.env` 和 `configs/remote_npu_ips.txt`，然后把新的 `SOURCE_MANIFEST_SHA256` 同步写入两节点 `cluster.env`。不要把 node0 的 `node.env` 复制给 node1。
-
-node0 复制：
-
-```bash
-cp configs/node0.env.example configs/node.env
-```
-
-node1 复制：
-
-```bash
-cp configs/node1.env.example configs/node.env
-```
-
-编辑两份本地配置。`NODE0_COORDINATOR_IP`、`LOCAL_IP`、`PEER_IP` 必须是实际承载 HCCL/Gloo 的地址，不能直接拿 SSH 管理地址代替。两节点分别确认：
+远端验证：
 
 ```bash
 source configs/cluster.env
-source configs/node.env
-ip route get "${PEER_IP}"
-ip -br addr show dev "${LOCAL_NIC}"
-npu-smi info
-sha256sum "${KEEPALIVE_STOP_SCRIPT}" "${KEEPALIVE_START_SCRIPT}"
+python3 scripts/source_manifest.py verify \
+  --expected-sha256 "${SOURCE_MANIFEST_SHA256}"
 ```
 
-把两个小写 SHA-256 填入 `node.env`。确认当前 0–7 卡健康、无他人任务且本次获准使用后，才把 `NPU_USE_CONFIRMED=NO` 改成 `YES`。这些配置文件在 `.gitignore` 中，不要强制加入 Git。
-
-`cluster.env` 必须在两节点逐字节相同，包括预先填写的数据盘 `MODELSCOPE_BIN` 绝对路径；即使该可执行文件只在 node0 使用，也不要在通过门禁后单边修改配置。用 `sha256sum configs/cluster.env` 比较两边结果。
-
-node1 模板默认通过 `/data/node0_disk2` 使用 node0 导出的共享模型和运行目录；如果服务器上的实际挂载不同，必须以 `findmnt -T PATH` 和 `df -hT PATH` 的现场结果修改，不能假设两台机器的本地绝对路径相同。
-
-## 2. 两节点预检
-
-两节点分别执行：
+## 2. 配置两节点
 
 ```bash
-bash scripts/00_preflight.sh configs/cluster.env configs/node.env
-```
-
-它检查 aarch64、8 个 Davinci 设备、NPU 状态、驱动挂载源、NIC/路由、端口、每卡 HCCN link/health、磁盘、Docker、完整 source manifest 和 keep-alive 脚本 identity。源码或配置修改后旧门禁自动失效，必须重跑。
-
-## 3. 两节点 HCCN 逐卡网络检查
-
-这一步是 HCCN L3 ping，不等价于 HCCL 集合通信。先在每台机器查看本机 8 张卡的 NPU IP：
-
-```bash
-for card in {0..7}; do
-  hccn_tool -i "${card}" -ip -g
-done
-```
-
-在每台机器创建对端卡 0–7 的 IP 清单：
-
-```bash
+cp configs/cluster.env.example configs/cluster.env
+cp configs/node0.env.example configs/node.env  # node0
+cp configs/node1.env.example configs/node.env  # node1
 cp configs/remote_npu_ips.txt.example configs/remote_npu_ips.txt
 ```
 
-填好后，两节点分别执行：
+两节点 `cluster.env` 必须一致。`NODE0_COORDINATOR_IP`、`LOCAL_IP`、
+`PEER_IP` 和 `LOCAL_NIC` 必须使用承载 HCCL/Gloo 的通信网络地址，不能直接
+假设 SSH 管理地址可用。
+
+`node.env` 只保留节点本身配置：
 
 ```bash
+NODE_RANK=0或1
+LOCAL_IP=<本节点通信IP>
+PEER_IP=<另一节点通信IP>
+LOCAL_NIC=<通信网卡名>
+AUTHORIZED_NPU_IDS=0,1,2,3,4,5,6,7
+MODEL_HOST_PATH=/data/node0_disk2/glm52-study/models/GLM-5.2-w8a8
+RUN_HOST_ROOT=/data/node0_disk2/glm52-study/runs
+LOCAL_STATE_ROOT=<本节点数据盘>/glm52-study/local-state
+```
+
+真实配置在 `.gitignore` 中，不要提交。
+
+## 3. 两节点预检和 HCCN
+
+每次源码或配置变化后，两节点分别执行：
+
+```bash
+bash scripts/00_preflight.sh configs/cluster.env configs/node.env
 bash scripts/01_hccn_ping.sh \
   configs/cluster.env configs/node.env configs/remote_npu_ips.txt
 ```
 
-## 4. 两节点拉取并核对镜像
+## 4. 镜像和模型门禁
 
-先看 `docker info` 的 `DockerRootDir` 和 `df -hT`。现有环境记录显示 node0 空间余量较紧；默认门禁要求 pull 完成后仍至少保留 80 GiB。如果预算不足，先由管理员确认精确清理目标或迁移 DockerRoot，不能用 `docker system prune` 做全局清理。
-
-两节点分别执行：
-
-```bash
-bash scripts/02_pull_image.sh \
-  configs/cluster.env configs/node.env --confirm-pull
-```
-
-脚本在 pull 前后检查 DockerRootDir 空间，并记录 image ID、RepoDigest、镜像内实际 package version 和 capture-patch label。两节点 image ID 必须一致；后续启动会强制消费这两个共享门禁。
-
-如果镜像已通过 `docker save`、传输文件 SHA-256、`docker load` 的流程从另一节点导入，不需要再次访问 quay.io；核对本地 `IMAGE_REF` 后用下面的只验证模式重建当前 source ID 对应的 image gate：
+镜像已经通过 `docker load` 导入时，两节点执行：
 
 ```bash
 bash scripts/02_pull_image.sh \
   configs/cluster.env configs/node.env --confirm-existing-image
 ```
 
-## 5. node0 下载并验证模型
-
-模型约 774 GB，只在共享模型目录下载一次。先把 ModelScope CLI 放到数据盘 venv，不要安装到紧张的根分区：
+模型已经下载完成后，在 node0 执行：
 
 ```bash
-python3 -m venv /data/node0_disk2/glm52-study/tools/modelscope-venv
-/data/node0_disk2/glm52-study/tools/modelscope-venv/bin/pip install -U modelscope
+bash scripts/04_model_manifest.sh configs/cluster.env configs/node.env
 ```
 
-模板已经把 `MODELSCOPE_BIN` 指向上述数据盘路径；创建 venv 不需要再修改已经过门禁的 `cluster.env`。然后只在 node0 执行：
+node1 使用相同的共享模型路径，不重新下载模型。
 
-```bash
-bash scripts/03_download_model.sh \
-  configs/cluster.env configs/node.env --confirm-large-download
-bash scripts/04_model_manifest.sh \
-  configs/cluster.env configs/node.env
-```
+## 5. 创建本轮 RUN_ID
 
-manifest 会固定校验官方 metadata hash、78 层、前 3 层 dense、256 个 routed experts、top-8、W8A8/W8A8_DYNAMIC 描述、safetensors header，以及 index 引用的 182 个文件、tensor payload 总量和实际文件总量。需要记录完整权重 SHA-256 清单时才追加 `--full-sha256`；它会顺序读取约 774 GB，不要与服务并行。
-
-模板已固定到 [ModelScope `Eco-Tech/GLM-5.2-w8a8`](https://www.modelscope.cn/models/Eco-Tech/GLM-5.2-w8a8/) 的 40 位 commit；不要改回 `master`/`main` 或其他可移动分支。细节见 `MODEL_PROVENANCE.md`。
-
-## 6. 创建唯一 RUN_ID 并准备 NPU
-
-只在 node0 生成一次 run ID，并写到两节点可见的共享目录：
+只在 node0 生成一次：
 
 ```bash
 source configs/cluster.env
 source configs/node.env
 mkdir -p "${RUN_HOST_ROOT}/operator"
 export RUN_ID="vendor-smoke-$(date -u +%Y%m%dT%H%M%SZ)"
-printf '%s\n' "${RUN_ID}" >"${RUN_HOST_ROOT}/operator/current-run-id"
+printf '%s\n' "${RUN_ID}" > "${RUN_HOST_ROOT}/operator/current-run-id"
 ```
 
-node1 读取完全相同的字符串，不能独立调用第二次 `date`：
+node1 读取相同值：
 
 ```bash
 source configs/cluster.env
 source configs/node.env
-export RUN_ID="$(tr -d '[:space:]' <"${RUN_HOST_ROOT}/operator/current-run-id")"
+export RUN_ID="$(tr -d '[:space:]' < "${RUN_HOST_ROOT}/operator/current-run-id")"
 ```
 
-两节点再次执行 `npu-smi info`，确认本轮仍可使用，然后在各自终端设置一次性确认并停止官方 keep-alive：
+两个终端都打印确认：
 
 ```bash
-export NPU_LAUNCH_CONFIRMATION="${RUN_ID}"
-bash scripts/05_prepare_npus.sh \
-  configs/cluster.env configs/node.env --confirm-stop-keepalive
+printf 'node=%s run_id=%s\n' "${NODE_RANK}" "${RUN_ID}"
 ```
 
-脚本只操作明确授权的 0–7 卡，获取节点级原子租约，保存停用前/后的 marker 与 PGID identity，并在准备失败时自动恢复同一组卡。prepare、HCCL、launch、stop、restore 还由本地 lifecycle 原子锁串行化。恢复所需脚本和状态保存在本机数据盘，即使 node0 的共享挂载中断，node1 仍有恢复材料。
+## 6. 两节点记录 NPU 状态
 
-## 7. 同时运行真实 16-rank HCCL 门禁
+先由操作者完成服务器要求的占卡进程处理，并确认卡可用。随后两节点执行：
 
-先在 node0 启动下面命令；它会等待 node1。立即在 node1 的另一个终端执行同一命令：
+```bash
+npu-smi info
+bash scripts/05_prepare_npus.sh configs/cluster.env configs/node.env
+```
+
+成功标志是 `NPU_READY`。该脚本不会启动、停止或恢复任何服务器维护进程；
+发现其他暴露 NPU 设备的 Docker 容器时只给出警告。
+
+## 7. 两节点 HCCL 集合通信
+
+先在 node0 启动，随后立即在 node1 启动同一命令：
 
 ```bash
 bash scripts/06_hccl_collective.sh configs/cluster.env configs/node.env
 ```
 
-该步骤在两节点各启动 8 个 `torch-npu` rank，实际执行 HCCL `all_reduce` 和 `all_to_all`。只有两边都出现 `HCCL_COLLECTIVE_OK` 才能启动模型。任一侧失败会恢复该侧 keep-alive；此时还要在另一侧执行恢复命令，并为下一次尝试创建新的 `RUN_ID`：
+两边都必须出现 `HCCL_COLLECTIVE_OK`。
 
-```bash
-bash scripts/20_restore_npus.sh configs/cluster.env configs/node.env
-```
+## 8. 启动 GLM-5.2
 
-## 8. 启动双节点 vendor smoke
-
-保持两个终端中的 `RUN_ID` 和 `NPU_LAUNCH_CONFIRMATION` 不变。先 node0、随后立即 node1 分别执行：
+先 node0、随后立即 node1：
 
 ```bash
 bash scripts/10_launch_node.sh configs/cluster.env configs/node.env
 ```
 
-node0 绑定 `${LOCAL_IP}:${API_PORT}`；node1 使用 `--headless --data-parallel-start-rank 1`，不会错误传入正数 `--api-server-count`。两边的 `--data-parallel-address` 都指向 node0。
-
-启动脚本要求预检、HCCN、两节点同一镜像、模型 ready、两节点 HCCL 和本轮 keep-alive 状态全部通过。若本节点启动失败，会停止本脚本创建的容器并恢复本节点 keep-alive；如果另一节点已经启动，还需在那里运行停服脚本。
-
-启动成功后脚本不会常驻充当跨节点 watchdog。实验期间应在两个终端持续查看容器状态；任一节点容器后续异常退出时，立即停止 peer 节点的本轮容器，再在两节点分别运行第 10 节停服/恢复命令。不要在另一 NPU 容器仍运行时手动启动 keep-alive。
-
-在 node0 等待 API：
+node0 等待 API：
 
 ```bash
 bash scripts/11_wait_ready.sh configs/cluster.env configs/node.env
 ```
 
-## 9. node0 发出 smoke 请求
-
-客户端只额外依赖 NumPy：
+看到 `SERVICE_READY` 后，先做最小生成验证：
 
 ```bash
 python3 -m venv .client-venv
@@ -247,67 +177,33 @@ python3 -m venv .client-venv
   --output-dir "${RUN_HOST_ROOT}/${RUN_ID}/client-smoke"
 ```
 
-vendor smoke 只验证真实权重能够加载、双节点能够生成，不要求 `routed_experts`。这一步成功后再进入 W8A8 capture patch 和 benchmark 阶段。
+`vendor_smoke` 只证明模型成功加载和生成，不是 expert-load 结果。
 
-## 10. 两节点安全停服并恢复 NPU
+## 9. 停止本项目启动的模型容器
 
-停止发送请求后，在 node0、node1 分别执行：
-
-```bash
-bash scripts/19_stop_node.sh configs/cluster.env configs/node.env
-```
-
-脚本校验保存的 container ID 和四个 ownership labels，只停止当前 run 的精确容器；随后恢复同一组 0–7 卡，并记录 `stopped_card_ids`、`restored_card_ids`、`restoration_status`。默认保留停止后的容器用于排障；确认日志后可再次执行：
+需要结束本轮服务时，在 node0、node1 分别执行：
 
 ```bash
 bash scripts/19_stop_node.sh configs/cluster.env configs/node.env --remove
 ```
 
-如果模型容器从未成功创建但 keep-alive 仍处于 `PREPARED`，直接运行：
+该脚本只操作带有本轮 ownership label 和精确 container ID 的 GLM 容器，不会
+操作其他用户容器或服务器维护进程。
 
-```bash
-bash scripts/20_restore_npus.sh configs/cluster.env configs/node.env
-```
+## 10. Expert capture 和 benchmark 当前门禁
 
-如果进程被 `kill -9` 或主机异常中断，lifecycle 锁会故意保留并 fail-closed。先查看 `${LOCAL_STATE_ROOT}/runs/${RUN_ID}/lifecycle.lock/owner.env`、确认其中 PID 已不存在，再检查 `docker ps --no-trunc`、`npu-smi info` 和 keep-alive state；只有确认没有仍在执行的操作或 NPU consumer 后，才把整个锁目录 `mv` 到同一数据盘的 `.stale.<timestamp>` 名称，再重试恢复。不要直接删除不明锁文件。
+正式 expert-load 实验必须让服务返回真实 `routed_experts`。当前同步包还没有
+GLM-5.2 W8A8 route-capture 派生镜像和 benchmark 适配器，因此不能把空值、
+零数组或文本输出当作 expert 分布。
 
-节点级 NPU lease `${LOCAL_STATE_ROOT}/npu-leases/cards-0-7` 同样包含 `owner.env`。如果 run state 已存在，保留 lease 并优先运行 `20_restore_npus.sh`；只有在 owner PID 已消失、该 run 尚无 state、无 NPU consumer 且 keep-alive 已验证为原始 running 状态时，才可把整个 lease 目录原子移动为 `.stale.<timestamp>`。不满足这些条件就停止操作并请管理员复核。
+下一步顺序是：
 
-不要使用 `killall`、`pkill -f`、`docker system prune`，也不要运行会全局清理其他用户任务的 performance 脚本。
+1. 核对远端镜像内 vLLM 和 vLLM-Ascend 版本；
+2. 启用 `--enable-return-routed-experts` 并通过
+   `scripts/12_smoke_request.py --require-routes`；
+3. 固定并下载 MMLU-Pro、LiveCodeBench、RULER、tau2-bench 和 SWE/OpenHands
+   小样本到远端；
+4. 分 benchmark 保存逐 token、逐层、top-8 logical expert ID；
+5. 统计 top-51 expert assignment share 和达到 90% 所需的最小 expert 数。
 
-## 正式 expert capture 的硬门禁
-
-当前仓库还没有 W8A8 route-capture patch 和派生镜像，因此不要把 vendor smoke 的空/null route 当成 expert 分布。下一阶段派生镜像必须：
-
-- 安装 vLLM `0.22.1` 与 vLLM-Ascend `0.22.1rc1`；
-- 带非 `none` 的 Docker label `glm52.capture_patch_id`；
-- 使用不可变 `MODEL_REVISION`；
-- 配置 `RUN_PROFILE=expert_capture`、`ENABLE_ROUTE_CAPTURE=1`、`MAX_NUM_SEQS=1`；
-- 显式关闭 async scheduling、prefix cache、dynamic EPLB、balance scheduling、fused MC2，并使用 eager mode；
-- 通过下面的 route gate：
-
-```bash
-.client-venv/bin/python scripts/12_smoke_request.py \
-  --base-url "http://${NODE0_COORDINATOR_IP}:${API_PORT}/v1" \
-  --model "${SERVED_MODEL_NAME}" \
-  --output-dir "${RUN_HOST_ROOT}/${RUN_ID}/route-gate" \
-  --require-routes --ignore-eos --max-tokens 4
-```
-
-门禁会发送四个确定性请求：主请求、完全相同的重复请求、同 prompt 的 `max_tokens=1` 请求，以及不同 prompt 的 contrast 请求。它要求 Base64 `.npy` 为 `uint8`、shape 为 `(P+G-1, 78, 8)`、dense 0–2 层为零、MoE 3–77 层 top-8 唯一；同时要求重复请求的 token IDs 与完整 route tensor 一致、1-token/4-token 的 prefill 边界一致、不同 prompt 的重叠 MoE prefill route 至少有一行变化，从而拒绝位置/层相关但输入无关的陈旧模板。
-
-当前同步包到这里为止。`benchmarks/README.md` 只列出下一阶段候选任务，没有下载 benchmark、没有 route-capture patch，也没有产生任何 expert-load 结果；必须先让派生镜像通过上述 route gate，再固定 benchmark commit 和下载适配器。
-
-## push 前本地验证
-
-```bash
-python3 scripts/source_manifest.py generate
-python3 scripts/source_manifest.py verify
-bash -n scripts/*.sh scripts/lib/*.sh
-.client-venv/bin/python -m unittest discover -s tests -v
-git -C ../.. status --short --ignored -- qinyingqi/expert_load
-python3 scripts/source_manifest.py bundle \
-  --output /tmp/glm52-expert-load-source.tar.gz
-```
-
-需要提交的是本目录中的 tracked 模板、脚本、文档和 `SOURCE_MANIFEST.json`；不要提交 `configs/cluster.env`、`configs/node.env`、`configs/remote_npu_ips.txt`、模型、运行日志、response 或 `.npy` route 数据。生成 manifest 后不要再修改受管文件；如有修改，重新运行 `generate`。
+在 route gate 通过前，不启动大规模 benchmark，避免得到无法分析的文本结果。

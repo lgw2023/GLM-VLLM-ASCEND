@@ -270,11 +270,29 @@ def collect_git_source_paths(repo_root: Path, package_root: Path) -> list[str]:
             binary=True,
         )
     )
+    deleted_raw_paths = bytes(
+        run_git(
+            repo_root,
+            "ls-files",
+            "-z",
+            "--deleted",
+            "--",
+            package_relative,
+            binary=True,
+        )
+    )
+    deleted_paths = {
+        Path(os.fsdecode(raw_path))
+        for raw_path in deleted_raw_paths.split(b"\0")
+        if raw_path
+    }
     relative_paths: list[str] = []
     for raw_path in raw_paths.split(b"\0"):
         if not raw_path:
             continue
         repo_relative = Path(os.fsdecode(raw_path))
+        if repo_relative in deleted_paths:
+            continue
         try:
             package_file = repo_relative.relative_to(Path(package_relative))
         except ValueError as exc:

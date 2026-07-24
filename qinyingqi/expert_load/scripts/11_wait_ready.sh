@@ -25,10 +25,10 @@ stop_on_readiness_failure() {
     local exit_status=$?
     trap - EXIT INT TERM
     if (( exit_status != 0 )); then
-        warn "readiness failed; stopping node0 container and restoring its keep-alive"
+        warn "readiness failed; stopping this run's node0 model container"
         bash "${SCRIPT_DIR}/19_stop_node.sh" \
             "${CLUSTER_CONFIG_ARG}" "${NODE_CONFIG_ARG}" || true
-        warn "stop and restore the peer node as well"
+        warn "stop this run's peer model container as well"
     fi
     exit "${exit_status}"
 }

@@ -24,21 +24,6 @@ CONTAINER_NAME="$(container_name)"
 RUN_DIR="$(host_run_dir)"
 LOCAL_SERVICE_DIR="$(local_run_dir)/service"
 mkdir -p "${RUN_DIR}" "${LOCAL_SERVICE_DIR}"
-acquire_lifecycle_lock launch
-trap 'release_lifecycle_lock' EXIT
-trap 'exit 130' INT
-trap 'exit 143' TERM
-KEEPALIVE_STATE="$(keepalive_state_file)"
-[[ -f "${KEEPALIVE_STATE}" ]] || die "run 05_prepare_npus.sh before launch"
-[[ "$(gate_value status "${KEEPALIVE_STATE}")" == PREPARED ]] || \
-    die "keep-alive state is not PREPARED: ${KEEPALIVE_STATE}"
-[[ "$(gate_value run_id "${KEEPALIVE_STATE}")" == "${RUN_ID}" ]] || \
-    die "keep-alive state belongs to another run"
-[[ "$(gate_value node_rank "${KEEPALIVE_STATE}")" == "${NODE_RANK}" ]] || \
-    die "keep-alive state belongs to another node"
-[[ "$(gate_value stopped_card_ids "${KEEPALIVE_STATE}")" == 0,1,2,3,4,5,6,7 ]] || \
-    die "keep-alive state does not cover exactly cards 0..7"
-require_run_npu_lease
 
 [[ ! -e "${RUN_DIR}/launch.started" && \
    ! -e "${LOCAL_SERVICE_DIR}/launch.started" ]] || \
@@ -57,14 +42,10 @@ container_owned_by_invocation() {
        "${INVOCATION_ID}" ]]
 }
 
-restore_after_launch_failure() {
+cleanup_after_launch_failure() {
     local exit_status=$?
-    local cleanup_signal_status=0
-    trap - EXIT
-    trap 'cleanup_signal_status=130' INT
-    trap 'cleanup_signal_status=143' TERM
+    trap - EXIT INT TERM
     if (( exit_status != 0 )); then
-        local safe_to_restore=1 running_consumers
         {
             printf 'failed_at=%s\n' "$(date --iso-8601=seconds)"
             printf 'exit_status=%s\n' "${exit_status}"
@@ -80,45 +61,23 @@ restore_after_launch_failure() {
         elif container_exists "${CONTAINER_NAME}"; then
             warn "same-name container is not owned by this launch invocation; leaving it untouched"
         fi
-        if ! running_consumers="$(running_npu_container_ids)"; then
-            warn "NPU consumer scan failed; keep-alive will not be restored"
-            safe_to_restore=0
-        elif [[ -n "${running_consumers}" ]]; then
-            safe_to_restore=0
-        fi
-        if (( safe_to_restore == 1 )); then
-            warn "launch failed locally; restoring keep-alive cards 0..7 on node${NODE_RANK}"
-            bash "${SCRIPT_DIR}/20_restore_npus.sh" \
-                "${CLUSTER_CONFIG_ARG}" "${NODE_CONFIG_ARG}" || true
-        else
-            warn "container is still running; keep-alive was NOT restored to avoid an NPU conflict"
-        fi
-        warn "if the peer node is already running, stop it and restore its keep-alive too"
+        warn "if the peer model container is already running, stop that run there too"
         warn "use a fresh RUN_ID for the next attempt"
     fi
-    release_lifecycle_lock || true
-    (( cleanup_signal_status == 0 )) || exit_status=${cleanup_signal_status}
     exit "${exit_status}"
 }
-trap restore_after_launch_failure EXIT
+trap cleanup_after_launch_failure EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-[[ "${NPU_USE_CONFIRMED}" == YES ]] || \
-    die "set NPU_USE_CONFIRMED=YES only after inspecting current npu-smi output"
-[[ "${NPU_LAUNCH_CONFIRMATION:-}" == "${RUN_ID}" ]] || \
-    die "export NPU_LAUNCH_CONFIRMATION=${RUN_ID} after this run's occupancy check"
 require_config_gate preflight
 require_config_gate hccn_ping
 require_cluster_image_gate
 require_cluster_hccl_gate
+require_npu_ready
 require_model_ready
 docker image inspect "${IMAGE_REF}" >/dev/null 2>&1 || die "image not found locally: ${IMAGE_REF}"
 
-python3 "${SCRIPT_DIR}/keepalive_state.py" snapshot \
-    --output "${RUN_DIR}/keepalive/before-launch.json"
-python3 "${SCRIPT_DIR}/keepalive_state.py" validate --expected stopped \
-    "${RUN_DIR}/keepalive/before-launch.json"
 python3 "${SCRIPT_DIR}/validate_model_files.py" \
     --model-path "${MODEL_HOST_PATH}" \
     --output "${RUN_DIR}/model-validation.prelaunch.json"
@@ -276,7 +235,11 @@ fi
 write_shell_command "${RUN_DIR}/launch.command.sh" \
     "${DOCKER_ARGS[@]}" "${IMAGE_REF}" "${SERVICE_ARGS[@]}"
 
-require_no_npu_containers "model container launch"
+RUNNING_NPU_CONTAINERS="$(running_npu_container_ids)"
+if [[ -n "${RUNNING_NPU_CONTAINERS}" ]]; then
+    warn "running containers expose NPU devices: ${RUNNING_NPU_CONTAINERS}"
+    warn "continuing because NPU occupancy is managed manually on this server"
+fi
 LAUNCH_ATTEMPTED=1
 CONTAINER_ID="$("${DOCKER_ARGS[@]}" "${IMAGE_REF}" "${SERVICE_ARGS[@]}")"
 [[ "${CONTAINER_ID}" =~ ^[0-9a-f]{64}$ ]] || \
@@ -308,7 +271,6 @@ if ! container_is_running "${CONTAINER_NAME}"; then
     die "container exited during launch; preserved for inspection: ${CONTAINER_NAME}"
 fi
 
-release_lifecycle_lock
 trap - EXIT INT TERM
 printf 'LAUNCH_OK container=%s id=%s run_dir=%s\n' \
     "${CONTAINER_NAME}" "${CONTAINER_ID}" "${RUN_DIR}"

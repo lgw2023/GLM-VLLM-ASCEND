@@ -84,7 +84,7 @@ validate_config() {
         GPU_MEMORY_UTILIZATION BLOCK_SIZE SEED HEALTH_TIMEOUT_SECONDS
         STOP_TIMEOUT_SECONDS MIN_DOCKER_FREE_GIB
         MIN_MODEL_STORAGE_FREE_GIB NODE_RANK LOCAL_IP PEER_IP LOCAL_NIC
-        AUTHORIZED_NPU_IDS NPU_USE_CONFIRMED MODEL_HOST_PATH RUN_HOST_ROOT LOCAL_STATE_ROOT
+        AUTHORIZED_NPU_IDS MODEL_HOST_PATH RUN_HOST_ROOT LOCAL_STATE_ROOT
     )
     local name
     for name in "${required[@]}"; do
@@ -370,109 +370,28 @@ require_model_ready() {
         die "model ready marker has a different path"
 }
 
-keepalive_state_file() {
-    printf '%s/runs/%s/keepalive/state.env\n' "${LOCAL_STATE_ROOT}" "${RUN_ID}"
-}
-
 local_run_dir() {
     require_run_id
     printf '%s/runs/%s\n' "${LOCAL_STATE_ROOT}" "${RUN_ID}"
 }
 
-npu_lease_dir() {
-    printf '%s/npu-leases/cards-0-7\n' "${LOCAL_STATE_ROOT}"
+npu_ready_file() {
+    printf '%s/npu-ready/NPU_READY\n' "$(host_run_dir)"
 }
 
-require_run_npu_lease() {
-    local lease_dir owner_file
-    lease_dir="$(npu_lease_dir)"
-    owner_file="${lease_dir}/owner.env"
-    [[ -d "${lease_dir}" && -f "${owner_file}" ]] || \
-        die "active node-level NPU lease is missing: ${lease_dir}"
-    [[ "$(gate_value run_id "${owner_file}")" == "${RUN_ID}" ]] || \
-        die "node-level NPU lease belongs to another run"
-    [[ "$(gate_value node_rank "${owner_file}")" == "${NODE_RANK}" ]] || \
-        die "node-level NPU lease belongs to another node"
-}
-
-lifecycle_lock_dir() {
-    printf '%s/lifecycle.lock\n' "$(local_run_dir)"
-}
-
-acquire_lifecycle_lock() {
-    local operation="$1"
-    [[ "${operation}" =~ ^[a-z][a-z0-9-]{0,31}$ ]] || \
-        die "invalid lifecycle operation name: ${operation}"
-    require_cmd date
-    require_cmd mkdir
-    require_cmd mv
-    LIFECYCLE_LOCK_DIR="$(lifecycle_lock_dir)"
-    LIFECYCLE_LOCK_OWNER="${LIFECYCLE_LOCK_DIR}/owner.env"
-    mkdir -p "$(local_run_dir)"
-
-    if [[ -n "${GLM52_LIFECYCLE_TOKEN:-}" ]]; then
-        [[ -f "${LIFECYCLE_LOCK_OWNER}" ]] || \
-            die "inherited lifecycle token has no owner record"
-        [[ "$(gate_value token "${LIFECYCLE_LOCK_OWNER}")" == \
-           "${GLM52_LIFECYCLE_TOKEN}" ]] || \
-            die "inherited lifecycle token does not own the lock"
-        [[ "$(gate_value run_id "${LIFECYCLE_LOCK_OWNER}")" == "${RUN_ID}" ]] || \
-            die "inherited lifecycle lock belongs to another run"
-        [[ "$(gate_value node_rank "${LIFECYCLE_LOCK_OWNER}")" == "${NODE_RANK}" ]] || \
-            die "inherited lifecycle lock belongs to another node"
-        LIFECYCLE_LOCK_OWNED=0
-        trap 'release_lifecycle_lock' EXIT
-        trap 'exit 130' INT
-        trap 'exit 143' TERM
-        return
-    fi
-
-    GLM52_LIFECYCLE_TOKEN="${operation}-node${NODE_RANK}-$(date -u +%Y%m%dT%H%M%S)-$$-${RANDOM}"
-    local pending_dir history_dir
-    pending_dir="$(local_run_dir)/.lifecycle.pending.${GLM52_LIFECYCLE_TOKEN}"
-    history_dir="$(local_run_dir)/lifecycle-history"
-    mkdir "${pending_dir}"
-    {
-        printf 'token=%s\n' "${GLM52_LIFECYCLE_TOKEN}"
-        printf 'operation=%s\n' "${operation}"
-        printf 'run_id=%s\n' "${RUN_ID}"
-        printf 'node_rank=%s\n' "${NODE_RANK}"
-        printf 'owner_pid=%s\n' "$$"
-        printf 'acquired_at=%s\n' "$(date --iso-8601=seconds)"
-    } >"${pending_dir}/owner.env"
-    if ! mv -T "${pending_dir}" "${LIFECYCLE_LOCK_DIR}" 2>/dev/null; then
-        mkdir -p "${history_dir}"
-        mv -T "${pending_dir}" \
-            "${history_dir}/failed-acquire-${GLM52_LIFECYCLE_TOKEN}" 2>/dev/null || true
-        if [[ -f "${LIFECYCLE_LOCK_OWNER}" ]]; then
-            warn "active or stale lifecycle lock owner:"
-            sed -n 's/^\(operation\|run_id\|node_rank\|owner_pid\|acquired_at\)=/  \1=/p' \
-                "${LIFECYCLE_LOCK_OWNER}" >&2
-        fi
-        die "another lifecycle operation holds ${LIFECYCLE_LOCK_DIR}; inspect it instead of deleting it blindly"
-    fi
-    export GLM52_LIFECYCLE_TOKEN
-    LIFECYCLE_LOCK_OWNED=1
-    trap 'release_lifecycle_lock' EXIT
-    trap 'exit 130' INT
-    trap 'exit 143' TERM
-}
-
-release_lifecycle_lock() {
-    [[ "${LIFECYCLE_LOCK_OWNED:-0}" == 1 ]] || return 0
-    require_cmd mv
-    [[ -f "${LIFECYCLE_LOCK_OWNER}" ]] || \
-        die "lifecycle owner record disappeared: ${LIFECYCLE_LOCK_OWNER}"
-    [[ "$(gate_value token "${LIFECYCLE_LOCK_OWNER}")" == \
-       "${GLM52_LIFECYCLE_TOKEN}" ]] || \
-        die "refusing to release another lifecycle operation's lock"
-    local history_dir
-    history_dir="$(local_run_dir)/lifecycle-history"
-    mkdir -p "${history_dir}"
-    mv -T "${LIFECYCLE_LOCK_DIR}" \
-        "${history_dir}/${GLM52_LIFECYCLE_TOKEN}"
-    LIFECYCLE_LOCK_OWNED=0
-    unset GLM52_LIFECYCLE_TOKEN
+require_npu_ready() {
+    local ready_file
+    ready_file="$(npu_ready_file)"
+    [[ -f "${ready_file}" ]] || die "run 05_prepare_npus.sh first: ${ready_file}"
+    [[ "$(gate_value run_id "${ready_file}")" == "${RUN_ID}" ]] || \
+        die "NPU readiness record belongs to another run"
+    [[ "$(gate_value node_rank "${ready_file}")" == "${NODE_RANK}" ]] || \
+        die "NPU readiness record belongs to another node"
+    [[ "$(gate_value config_fingerprint "${ready_file}")" == \
+       "$(config_fingerprint)" ]] || \
+        die "NPU readiness record has stale configuration; rerun 05_prepare_npus.sh"
+    [[ "$(gate_value source_id "${ready_file}")" == "$(source_id)" ]] || \
+        die "NPU readiness record has stale source; rerun 05_prepare_npus.sh"
 }
 
 running_npu_container_ids() {

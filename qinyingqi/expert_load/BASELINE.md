@@ -22,8 +22,7 @@ Formal capture also requires an immutable model revision and a derived-image lab
 - the complete Gitless source manifest and its externally configured SHA-256 must match on both nodes;
 - a real 16-rank HCCL `all_reduce` and `all_to_all` must pass for the exact run and image ID;
 - image IDs must match across nodes and the indexed model shard set must be complete;
-- the official keep-alive for exactly cards 0-7 must be identity-checked, stopped before HCCL/model use, and restored on both success and failure paths;
-- results must record `stopped_card_ids`, `restored_card_ids`, and `restoration_status`.
+- the operator must confirm that cards 0-7 are available before running step 05.
 
 HCCN ping is a network check and is not evidence that HCCL collectives work.
 

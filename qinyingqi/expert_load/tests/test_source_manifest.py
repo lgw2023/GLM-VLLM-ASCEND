@@ -6,6 +6,7 @@ import tarfile
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 SCRIPT_PATH = Path(__file__).parents[1] / "scripts" / "source_manifest.py"
@@ -99,6 +100,40 @@ class SourceManifestTests(unittest.TestCase):
             self.assertIn(f"{prefix}/{MANIFEST.MANIFEST_NAME}", names)
             self.assertIn(f"{prefix}/scripts/00_preflight.sh", names)
             self.assertNotIn(f"{prefix}/configs/node.env", names)
+
+    def test_deleted_tracked_file_is_omitted_from_generation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repo_root = Path(directory)
+            package_root = repo_root / "qinyingqi" / "expert_load"
+            package_root.mkdir(parents=True)
+            self.make_package(package_root)
+            tracked_paths = [
+                f"qinyingqi/expert_load/{relative_path}"
+                for relative_path in sorted(MANIFEST.REQUIRED_SOURCE_FILES)
+            ]
+            deleted_path = "qinyingqi/expert_load/scripts/legacy_stop.py"
+
+            def fake_run_git(
+                command_root: Path, *args: str, binary: bool = False
+            ) -> str | bytes:
+                if args[:2] == ("rev-parse", "--show-toplevel"):
+                    return str(repo_root)
+                if args[:2] == ("rev-parse", "HEAD"):
+                    if command_root.name == "vllm":
+                        return MANIFEST.PINNED_VLLM_COMMIT
+                    return MANIFEST.PINNED_VLLM_ASCEND_COMMIT
+                if args[:2] == ("status", "--porcelain"):
+                    return ""
+                if args[:3] == ("ls-files", "-z", "--deleted"):
+                    return f"{deleted_path}\0".encode()
+                if args[:2] == ("ls-files", "-z"):
+                    return ("\0".join([*tracked_paths, deleted_path]) + "\0").encode()
+                self.fail(f"unexpected Git invocation: {command_root} {args}")
+
+            with patch.object(MANIFEST, "run_git", side_effect=fake_run_git):
+                paths = MANIFEST.collect_git_source_paths(repo_root, package_root)
+
+            self.assertEqual(paths, sorted(MANIFEST.REQUIRED_SOURCE_FILES))
 
 
 if __name__ == "__main__":

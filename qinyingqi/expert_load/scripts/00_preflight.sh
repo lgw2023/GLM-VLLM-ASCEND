@@ -171,19 +171,6 @@ done
 printf '\n[source manifest]\n'
 verify_source_manifest
 
-printf '\n[keep-alive script identities]\n'
-for keepalive_var in KEEPALIVE_STOP_SCRIPT KEEPALIVE_START_SCRIPT; do
-    require_var "${keepalive_var}"
-    keepalive_script="${!keepalive_var}"
-    [[ -f "${keepalive_script}" ]] || \
-        die "configured keep-alive script not found: ${keepalive_script}"
-    sha256sum "${keepalive_script}"
-done
-
-if [[ "${NPU_USE_CONFIRMED}" != YES ]]; then
-    die "inspect the npu-smi/process output, confirm all 0-7 cards are authorized, then set NPU_USE_CONFIRMED=YES"
-fi
-
 touch "${OUT_DIR}/SUCCESS.node${NODE_RANK}"
 GATE_FILE="$(write_config_gate preflight)"
 printf '\nPREFLIGHT_OK output=%s gate=%s\n' "${OUT_DIR}" "${GATE_FILE}"
