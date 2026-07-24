@@ -7,6 +7,9 @@ benchmark 实验提供运行入口。
 所有远端命令都使用 Ascend 原生组件：`npu-smi`、`hccn_tool`、HCCL、
 `torch-npu` 和 `/dev/davinci*`。不要替换成 CUDA、NCCL 或 NVIDIA 命令。
 
+服务器源码已清空、模型已经下载好的完整双节点流程见
+[`REMOTE_A2_FROM_SCRATCH.md`](REMOTE_A2_FROM_SCRATCH.md)。
+
 ## 运行原则
 
 - 服务器上的 NPU 占用由操作者手工管理，本项目不会调用服务器维护脚本。
@@ -23,12 +26,18 @@ benchmark 实验提供运行入口。
 cd qinyingqi/expert_load
 python3 scripts/source_manifest.py generate
 python3 scripts/source_manifest.py verify
+MANIFEST_SHA256="$(python3 scripts/source_manifest.py digest)"
 python3 scripts/source_manifest.py bundle \
+  --expected-sha256 "${MANIFEST_SHA256}" \
   --output /tmp/glm52-expert-load-source.tar.gz
 
-sha256sum SOURCE_MANIFEST.json
-sha256sum /tmp/glm52-expert-load-source.tar.gz
+printf '填入 cluster.env 的清单哈希: %s\n' "${MANIFEST_SHA256}"
+shasum -a 256 /tmp/glm52-expert-load-source.tar.gz
 ```
+
+这两个哈希用途不同：`SOURCE_MANIFEST_SHA256` 必须填写
+`SOURCE_MANIFEST.json` 的哈希（上面的 `MANIFEST_SHA256`）；压缩包哈希只用于
+传输前后核对 `.tar.gz`，绝不能填入 `cluster.env`。
 
 把压缩包传到两台服务器并从 `GLM-VLLM-ASCEND` 根目录解压。不要传模型、
 benchmark 数据、运行日志或真实配置文件。
@@ -47,6 +56,21 @@ source configs/cluster.env
 python3 scripts/source_manifest.py verify \
   --expected-sha256 "${SOURCE_MANIFEST_SHA256}"
 ```
+
+如果这里报告 `source manifest SHA-256 mismatch`，先执行：
+
+```bash
+python3 scripts/source_manifest.py verify
+ACTUAL_MANIFEST_SHA256="$(python3 scripts/source_manifest.py digest)"
+printf 'cluster.env=%s\nactual=%s\n' \
+  "${SOURCE_MANIFEST_SHA256}" "${ACTUAL_MANIFEST_SHA256}"
+```
+
+- 第一条成功：源码包完整，`cluster.env` 错填了哈希；在两节点把
+  `SOURCE_MANIFEST_SHA256` 改为可信 Mac 发布时记录的
+  `ACTUAL_MANIFEST_SHA256`，重新 `source`。无需动模型、镜像或运行目录。
+- 第一条也失败并指向某个源码文件：文件被修改或漏传，重新核对压缩包哈希并
+  解压同一份干净源码包；不要在无 `.git` 的服务器上运行 `generate`。
 
 ## 2. 配置两节点
 
@@ -98,10 +122,13 @@ bash scripts/02_pull_image.sh \
 模型已经下载完成后，在 node0 执行：
 
 ```bash
+bash scripts/03_download_model.sh \
+  configs/cluster.env configs/node.env --adopt-existing
 bash scripts/04_model_manifest.sh configs/cluster.env configs/node.env
 ```
 
-node1 使用相同的共享模型路径，不重新下载模型。
+`--adopt-existing` 只读取并严格校验现有模型，然后创建 revision-bound 状态记录；
+不会联网或重新下载权重。node1 使用相同的共享模型路径，不执行 03、不重新下载。
 
 ## 5. 创建本轮 RUN_ID
 

@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import io
 import importlib.util
 import json
+import sys
 import tarfile
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
@@ -69,6 +72,27 @@ class SourceManifestTests(unittest.TestCase):
                     root, manifest_path, expected_sha256="0" * 64
                 )
 
+    def test_digest_command_prints_only_verified_manifest_sha256(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest_path = self.make_package(root)
+            expected_sha256 = MANIFEST.sha256_file(manifest_path)
+            output = io.StringIO()
+            arguments = [
+                str(SCRIPT_PATH),
+                "digest",
+                "--package-root",
+                str(root),
+                "--manifest",
+                str(manifest_path),
+            ]
+
+            with patch.object(sys, "argv", arguments), redirect_stdout(output):
+                exit_status = MANIFEST.main()
+
+            self.assertEqual(exit_status, 0)
+            self.assertEqual(output.getvalue(), f"{expected_sha256}\n")
+
     def test_parent_path_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -111,6 +135,9 @@ class SourceManifestTests(unittest.TestCase):
                 f"qinyingqi/expert_load/{relative_path}"
                 for relative_path in sorted(MANIFEST.REQUIRED_SOURCE_FILES)
             ]
+            generated_archive = (
+                "qinyingqi/expert_load/glm52-expert-load-source.tar.gz"
+            )
             deleted_path = "qinyingqi/expert_load/scripts/legacy_stop.py"
 
             def fake_run_git(
@@ -127,7 +154,12 @@ class SourceManifestTests(unittest.TestCase):
                 if args[:3] == ("ls-files", "-z", "--deleted"):
                     return f"{deleted_path}\0".encode()
                 if args[:2] == ("ls-files", "-z"):
-                    return ("\0".join([*tracked_paths, deleted_path]) + "\0").encode()
+                    return (
+                        "\0".join(
+                            [*tracked_paths, generated_archive, deleted_path]
+                        )
+                        + "\0"
+                    ).encode()
                 self.fail(f"unexpected Git invocation: {command_root} {args}")
 
             with patch.object(MANIFEST, "run_git", side_effect=fake_run_git):

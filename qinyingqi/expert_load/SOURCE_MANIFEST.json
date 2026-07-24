@@ -16,9 +16,14 @@
       "sha256": "20e4c9d2f30bb657286b53ca4aa6f50de1e59322bbdf1847d1d337e43488c297"
     },
     {
-      "bytes": 6339,
+      "bytes": 7822,
       "path": "README.md",
-      "sha256": "3720b5348c82ffcd285743f8677a29a9d9b3094db3e4d952f236c69c3c63c77f"
+      "sha256": "4313bd5a20abb9c5413592f41a92d49ed46532dca755653549eba942ca2f6bd8"
+    },
+    {
+      "bytes": 21940,
+      "path": "REMOTE_A2_FROM_SCRATCH.md",
+      "sha256": "5cfa2601f24c5024662c8915b0b949c2ab451d95d839e6c7dc8247248d86053e"
     },
     {
       "bytes": 269,
@@ -76,9 +81,9 @@
       "sha256": "f24c1942647c71d5b81ff5ea288a1c91149a27c16c93c7753e5af8f1f0e3f517"
     },
     {
-      "bytes": 2903,
+      "bytes": 3999,
       "path": "scripts/03_download_model.sh",
-      "sha256": "477f24fb9bc8b2d566921645a17892182b985f761f3b542eba6867816c121784"
+      "sha256": "5069169ae51c0e846eee3858d97797b0083f5969458381770e52663123ea0f4b"
     },
     {
       "bytes": 3184,
@@ -126,9 +131,9 @@
       "sha256": "559c6079b077cfe010508d3605e03da7e0016784dc2ccba6c0f6ea8b407fc468"
     },
     {
-      "bytes": 19174,
+      "bytes": 19616,
       "path": "scripts/source_manifest.py",
-      "sha256": "27535bdd81435fbc6cf6fdb5a0c04c461712eb99473dc465d4cdeee81e60e9d8"
+      "sha256": "fe0ebfecfe19b6854521acfd00ee9060e9952408da7caacb0e4237cabd8d28ca"
     },
     {
       "bytes": 13244,
@@ -141,9 +146,9 @@
       "sha256": "809bd3bd353593b1ba901970d6d9422ecaff7a0e661739a542204b3e367d7579"
     },
     {
-      "bytes": 6069,
+      "bytes": 7190,
       "path": "tests/test_source_manifest.py",
-      "sha256": "8c5184e6f5e6d04ae6fe60cce6954cf017e13bcb752425d87554f613b65a7e22"
+      "sha256": "2139714311473b01d0f96d4533afb16903982bec95e712a0e8663284c454dfda"
     },
     {
       "bytes": 7726,

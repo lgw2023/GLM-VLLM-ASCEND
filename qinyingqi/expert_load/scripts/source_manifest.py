@@ -21,6 +21,7 @@ SCHEMA_VERSION = 1
 HASH_ALGORITHM = "sha256"
 MANIFEST_NAME = "SOURCE_MANIFEST.json"
 PACKAGE_ARCHIVE_PREFIX = Path("qinyingqi/expert_load")
+GENERATED_SOURCE_FILES = frozenset({"glm52-expert-load-source.tar.gz"})
 PINNED_VLLM_COMMIT = "0decac0d96c42b49572498019f0a0e3600f50398"
 PINNED_VLLM_ASCEND_COMMIT = "5f6faa0cb8830f667266f3b8121cd1383606f2a1"
 LOWER_SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -298,7 +299,7 @@ def collect_git_source_paths(repo_root: Path, package_root: Path) -> list[str]:
         except ValueError as exc:
             raise ManifestError(f"Git returned a path outside the package: {repo_relative}") from exc
         relative_path = package_file.as_posix()
-        if relative_path == MANIFEST_NAME:
+        if relative_path == MANIFEST_NAME or relative_path in GENERATED_SOURCE_FILES:
             continue
         validate_relative_path(relative_path)
         resolve_source_file(package_root, relative_path)
@@ -477,6 +478,11 @@ def main() -> int:
     verify_parser.add_argument("--expected-sha256")
     verify_parser.add_argument("--quiet", action="store_true")
 
+    digest_parser = subparsers.add_parser(
+        "digest", help="verify the source tree and print only the manifest SHA-256"
+    )
+    add_common_paths(digest_parser)
+
     bundle_parser = subparsers.add_parser(
         "bundle", help="build a deterministic source-only tar.gz without .git"
     )
@@ -499,6 +505,9 @@ def main() -> int:
             )
             if not args.quiet:
                 print_summary("SOURCE_MANIFEST_OK", summary)
+        elif args.command == "digest":
+            summary = verify_manifest(args.package_root, args.manifest)
+            print(summary["manifest_sha256"])
         else:
             summary = build_bundle(
                 args.package_root,
