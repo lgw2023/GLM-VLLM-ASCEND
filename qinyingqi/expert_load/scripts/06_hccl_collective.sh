@@ -142,7 +142,6 @@ docker rm "${CONTAINER_NAME}"
     printf 'image_id=%s\n' "$(current_image_id)"
     printf 'config_fingerprint=%s\n' "$(config_fingerprint)"
     printf 'cluster_config_sha256=%s\n' "$(cluster_config_sha256)"
-    printf 'source_id=%s\n' "$(source_id)"
     printf 'completed_at=%s\n' "$(date --iso-8601=seconds)"
 } >"${OUT_DIR}/HCCL_COLLECTIVE_OK"
 

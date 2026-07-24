@@ -18,59 +18,25 @@ benchmark 实验提供运行入口。
 - 模型、镜像和 benchmark 数据只放远端服务器，不下载到 Mac。
 - 两台节点必须使用相同 `RUN_ID`、相同镜像 ID 和相同模型路径。
 
-## 1. 发布无 Git 源码包
+## 1. 直接同步源码目录
 
-服务器禁止保存 `.git`。在 Mac 的完整 Git 工作树中执行：
+源码不再做 SHA、manifest 或 bundle 校验，也不需要在服务器解压发布包。服务器
+禁止保存 `.git` 不影响直接复制这个子目录；使用团队允许的 `rsync`、`scp -r`
+或文件传输工具，把 Mac 上的 `qinyingqi/expert_load/` 同步到两节点即可。
 
-```bash
-cd qinyingqi/expert_load
-python3 scripts/source_manifest.py generate
-python3 scripts/source_manifest.py verify
-MANIFEST_SHA256="$(python3 scripts/source_manifest.py digest)"
-python3 scripts/source_manifest.py bundle \
-  --expected-sha256 "${MANIFEST_SHA256}" \
-  --output /tmp/glm52-expert-load-source.tar.gz
-
-printf '填入 cluster.env 的清单哈希: %s\n' "${MANIFEST_SHA256}"
-shasum -a 256 /tmp/glm52-expert-load-source.tar.gz
-```
-
-这两个哈希用途不同：`SOURCE_MANIFEST_SHA256` 必须填写
-`SOURCE_MANIFEST.json` 的哈希（上面的 `MANIFEST_SHA256`）；压缩包哈希只用于
-传输前后核对 `.tar.gz`，绝不能填入 `cluster.env`。
-
-把压缩包传到两台服务器并从 `GLM-VLLM-ASCEND` 根目录解压。不要传模型、
-benchmark 数据、运行日志或真实配置文件。
-
-将 `SOURCE_MANIFEST.json` 的 SHA-256 填到两节点相同的
-`configs/cluster.env`：
+不要同步模型、benchmark 数据、运行日志和真实配置。远端只做最小存在性检查：
 
 ```bash
-SOURCE_MANIFEST_SHA256=<64位小写SHA-256>
+cd <远端源码目录>/qinyingqi/expert_load
+test -x scripts/00_preflight.sh
+test -x scripts/10_launch_node.sh
+for script in scripts/00_preflight.sh scripts/10_launch_node.sh; do
+  bash -n "${script}"
+done
 ```
 
-远端验证：
-
-```bash
-source configs/cluster.env
-python3 scripts/source_manifest.py verify \
-  --expected-sha256 "${SOURCE_MANIFEST_SHA256}"
-```
-
-如果这里报告 `source manifest SHA-256 mismatch`，先执行：
-
-```bash
-python3 scripts/source_manifest.py verify
-ACTUAL_MANIFEST_SHA256="$(python3 scripts/source_manifest.py digest)"
-printf 'cluster.env=%s\nactual=%s\n' \
-  "${SOURCE_MANIFEST_SHA256}" "${ACTUAL_MANIFEST_SHA256}"
-```
-
-- 第一条成功：源码包完整，`cluster.env` 错填了哈希；在两节点把
-  `SOURCE_MANIFEST_SHA256` 改为可信 Mac 发布时记录的
-  `ACTUAL_MANIFEST_SHA256`，重新 `source`。无需动模型、镜像或运行目录。
-- 第一条也失败并指向某个源码文件：文件被修改或漏传，重新核对压缩包哈希并
-  解压同一份干净源码包；不要在无 `.git` 的服务器上运行 `generate`。
+不再需要 `SOURCE_MANIFEST_SHA256`。旧 `cluster.env` 中即使暂时保留这一行，
+新脚本也会忽略它；为了清晰可以手工删掉。
 
 ## 2. 配置两节点
 

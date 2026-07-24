@@ -35,7 +35,6 @@ fi
     printf 'node_rank=%s\n' "${NODE_RANK}"
     printf 'authorized_npu_ids=%s\n' "${AUTHORIZED_NPU_IDS}"
     printf 'config_fingerprint=%s\n' "$(config_fingerprint)"
-    printf 'source_id=%s\n' "$(source_id)"
     printf 'checked_at=%s\n' "$(date --iso-8601=seconds)"
 } >"${READY_FILE}"
 

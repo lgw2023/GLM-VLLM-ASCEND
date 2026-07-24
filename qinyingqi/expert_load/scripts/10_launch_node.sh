@@ -229,7 +229,6 @@ fi
     printf 'image_capture_patch_id=%s\n' "${IMAGE_PATCH_ID}"
     printf 'model_id=%s\n' "${MODEL_ID}"
     printf 'model_revision=%s\n' "${MODEL_REVISION}"
-    source_identity_metadata
     image_metadata
 } >"${RUN_DIR}/launch.metadata"
 write_shell_command "${RUN_DIR}/launch.command.sh" \

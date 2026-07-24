@@ -168,9 +168,6 @@ for info_file in \
     fi
 done
 
-printf '\n[source manifest]\n'
-verify_source_manifest
-
 touch "${OUT_DIR}/SUCCESS.node${NODE_RANK}"
 GATE_FILE="$(write_config_gate preflight)"
 printf '\nPREFLIGHT_OK output=%s gate=%s\n' "${OUT_DIR}" "${GATE_FILE}"

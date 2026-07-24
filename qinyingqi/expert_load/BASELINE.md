@@ -12,14 +12,13 @@
 
 `quay.io/ascend/vllm-ascend:glm5.2` is a vendor functional-smoke lane. The formal expert-load lane is a derived image built from the locked group source plus the W8A8 route-capture patch. Never merge results from the two lanes without recording image digest and package versions.
 
-The remote nodes intentionally retain no `.git` metadata. Source provenance is instead content-addressed by `SOURCE_MANIFEST.json`; its SHA-256 is pinned in the byte-identical two-node `cluster.env`, and every preflight, image, HCCL, and launch gate records and revalidates that source ID. The manifest also carries the locked vLLM and vLLM-Ascend commit identifiers used to create the release.
+The remote nodes intentionally retain no `.git` metadata. Initial bring-up deliberately has no runtime source-content or source-SHA gate: source is copied directly from the group repository so deployment cannot be blocked by a manually transcribed digest. Image identity, package versions, immutable model revision, model validation and run configuration remain recorded. Formal result reports should name the group Git commit used for the run, but that record does not block service startup.
 
 Formal capture also requires an immutable model revision and a derived-image label `glm52.capture_patch_id` matching the run configuration. A configured version string alone is not provenance; the launcher probes installed package metadata before starting.
 
 ## Infrastructure gate
 
 - HCCN per-card link/health and L3 ping must pass on both nodes;
-- the complete Gitless source manifest and its externally configured SHA-256 must match on both nodes;
 - a real 16-rank HCCL `all_reduce` and `all_to_all` must pass for the exact run and image ID;
 - image IDs must match across nodes and the indexed model shard set must be complete;
 - the operator must confirm that cards 0-7 are available before running step 05.

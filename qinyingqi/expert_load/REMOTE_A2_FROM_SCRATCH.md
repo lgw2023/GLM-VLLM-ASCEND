@@ -2,7 +2,7 @@
 
 本文给出从“服务器上没有项目源码，但模型权重已经下载完成”开始，到双节点
 HCCL 验证、启动 GLM-5.2 和完成最小请求的完整步骤。所有模型、镜像、benchmark
-数据和运行结果只存在远端服务器；Mac 只生成几十 KB 的源码包。
+数据和运行结果只存在远端服务器；Mac 只同步小体积源码目录。
 
 当前阶段使用 `vendor_smoke`，目标是先证明 2 节点 × 8 张 Ascend NPU 可以稳定
 加载并调用模型。它还不是 expert-load 实验结果；正式 benchmark 必须在 route
@@ -25,7 +25,7 @@ capture 门禁通过后再运行。
   和 `/dev/davinci*`；不要使用 NVIDIA、CUDA 或 NCCL 命令。
 - `7.150.8.22` 和 `7.150.15.14` 是 SSH 管理入口，不自动等于
   `LOCAL_IP`、`PEER_IP` 或 `NODE0_COORDINATOR_IP`。
-- 服务器禁止保留 `.git`，只部署由 `source_manifest.py bundle` 生成的源码包。
+- 服务器禁止保留 `.git`；直接同步 `qinyingqi/expert_load/` 子目录即可。
 - 模型已经存在，不运行 ModelScope 下载；node0 用 `--adopt-existing` 只读校验。
 - 服务器占卡/保活由操作者人工处理。本项目不启动、停止或恢复任何维护脚本。
 - 不要停止、删除或复用其他人的容器。确认 0–7 卡确实分配给本次任务后再启动。
@@ -46,62 +46,55 @@ PROJECT_ROOT=/data/disk2/glm52-study/GLM-VLLM-ASCEND
 cd "${PROJECT_ROOT}/qinyingqi/expert_load"
 ```
 
-## 1. 在 Mac 生成无 Git 源码包
+## 1. 直接同步源码目录
 
-只在 Mac 的完整 Git 工作树执行：
+不再生成 source manifest、SHA 或发布压缩包。通过团队允许的 `rsync`、
+`scp -r` 或文件传输工具，把下面这个小目录同步到两台服务器：
 
-```bash
-cd /Users/qyqsmacbookpro/Desktop/GLM-VLLM-ASCEND/qinyingqi/expert_load
-
-python3 scripts/source_manifest.py generate
-python3 scripts/source_manifest.py verify
-MANIFEST_SHA256="$(python3 scripts/source_manifest.py digest)"
-
-python3 scripts/source_manifest.py bundle \
-  --expected-sha256 "${MANIFEST_SHA256}" \
-  --output /tmp/glm52-expert-load-source.tar.gz
-
-BUNDLE_SHA256="$(shasum -a 256 /tmp/glm52-expert-load-source.tar.gz | awk '{print $1}')"
-printf 'MANIFEST_SHA256=%s\nBUNDLE_SHA256=%s\n' \
-  "${MANIFEST_SHA256}" "${BUNDLE_SHA256}"
+```text
+/Users/qyqsmacbookpro/Desktop/GLM-VLLM-ASCEND/qinyingqi/expert_load/
 ```
 
-把这两个值分开保存：
-
-- `MANIFEST_SHA256`：填入两节点 `configs/cluster.env` 的
-  `SOURCE_MANIFEST_SHA256`。
-- `BUNDLE_SHA256`：仅用于校验传到服务器的 `.tar.gz`。
-
-二者通常不同。把 `BUNDLE_SHA256` 填进 `SOURCE_MANIFEST_SHA256` 会出现
-`source manifest SHA-256 mismatch`。
-
-源码包不包含 `.git`、真实配置、模型、benchmark 数据和运行日志。通过团队允许
-的传输方式把同一个 `/tmp/glm52-expert-load-source.tar.gz` 传到两台机器；不要在
-Mac 下载模型或 benchmark。
-
-## 2. 两节点核对并解压同一个源码包
-
-在每个节点先核对传输包。把 `<MAC记录的BUNDLE_SHA256>` 替换为步骤 1 的值：
+例如 Mac 可以使用 `rsync`，同时排除节点本地配置和运行产物：
 
 ```bash
-sha256sum /path/to/glm52-expert-load-source.tar.gz
-test "$(sha256sum /path/to/glm52-expert-load-source.tar.gz | awk '{print $1}')" = \
-  '<MAC记录的BUNDLE_SHA256>'
+LOCAL_SOURCE=/Users/qyqsmacbookpro/Desktop/GLM-VLLM-ASCEND/qinyingqi/expert_load/
+
+rsync -av \
+  --exclude '.client-venv/' \
+  --exclude 'configs/cluster.env' \
+  --exclude 'configs/node.env' \
+  --exclude 'configs/remote_npu_ips.txt' \
+  "${LOCAL_SOURCE}" \
+  root@7.150.8.22:/data/node0_disk2/glm52-study/GLM-VLLM-ASCEND/qinyingqi/expert_load/
+
+rsync -av \
+  --exclude '.client-venv/' \
+  --exclude 'configs/cluster.env' \
+  --exclude 'configs/node.env' \
+  --exclude 'configs/remote_npu_ips.txt' \
+  "${LOCAL_SOURCE}" \
+  root@7.150.15.14:/data/disk2/glm52-study/GLM-VLLM-ASCEND/qinyingqi/expert_load/
 ```
 
-只有 `test` 返回 0 才解压：
+如果 Mac 不能直连，使用团队已有的中转方式即可。只传源码，不传模型、镜像、
+benchmark 数据或运行目录。这个子目录自身没有 `.git`。
+
+## 2. 两节点做最小源码存在性检查
+
+两节点分别进入各自的 `PROJECT_ROOT` 后执行：
 
 ```bash
-mkdir -p "${PROJECT_ROOT}"
-tar -xzf /path/to/glm52-expert-load-source.tar.gz -C "${PROJECT_ROOT}"
 cd "${PROJECT_ROOT}/qinyingqi/expert_load"
-
-test ! -e "${PROJECT_ROOT}/.git"
-python3 scripts/source_manifest.py verify
+test -x scripts/00_preflight.sh
+test -x scripts/10_launch_node.sh
+test -f scripts/lib/common.sh
+for script in scripts/00_preflight.sh scripts/10_launch_node.sh; do
+  bash -n "${script}"
+done
 ```
 
-最后一条必须出现 `SOURCE_MANIFEST_OK`。服务器没有 `.git` 是预期状态；不要在
-服务器执行 `source_manifest.py generate`。
+没有哈希、manifest 或解压门禁。只要所需脚本存在并能被 Bash 解析，就继续配置。
 
 ## 3. 先做只读环境检查
 
@@ -197,12 +190,11 @@ done
 cp configs/cluster.env.example configs/cluster.env
 ```
 
-把下列占位符替换为步骤 1 和步骤 4 的真实值；其余值保持一致：
+把下列占位符替换为步骤 4 的真实值；其余值保持一致：
 
 ```bash
 CLUSTER_NAME=glm52-a2-2x8
 NODE0_COORDINATOR_IP=<node0通信IP>
-SOURCE_MANIFEST_SHA256=<步骤1的MANIFEST_SHA256>
 
 MODEL_ID=Eco-Tech/GLM-5.2-w8a8
 MODEL_REVISION=edd93687ef1c3417d0b92e2cd01cf67e9e9c0039
@@ -338,38 +330,16 @@ node1 必须读到 `node0-storage-ok`。若模型实际放在另一个目录，�
 允许的方式把它放到两节点都能以同一绝对路径读取的位置，或者同步修改两节点
 `MODEL_HOST_PATH`；不要在 Mac 中转 774 GB 权重。
 
-## 8. 校验源码身份；SHA mismatch 的正确处理
+## 8. 确认两节点配置一致
 
-两节点执行：
-
-```bash
-source configs/cluster.env
-python3 scripts/source_manifest.py verify \
-  --expected-sha256 "${SOURCE_MANIFEST_SHA256}"
-```
-
-成功标志是 `SOURCE_MANIFEST_OK`。如果失败：
-
-```bash
-python3 scripts/source_manifest.py verify
-ACTUAL_MANIFEST_SHA256="$(python3 scripts/source_manifest.py digest)"
-printf 'configured=%s\nactual=%s\n' \
-  "${SOURCE_MANIFEST_SHA256}" "${ACTUAL_MANIFEST_SHA256}"
-```
-
-- 不带 expected 的验证成功：文件与包内清单一致。只有当步骤 2 的压缩包哈希已
-  与 Mac 的可信 `BUNDLE_SHA256` 核对过，才把两节点配置改为 Mac 记录的
-  `MANIFEST_SHA256`。最常见错误是错填了 `.tar.gz` 的哈希。
-- 不带 expected 的验证也失败：源码文件被修改、漏传或混合了两个版本。重新
-  解压同一个已核对 `BUNDLE_SHA256` 的源码包；不要在服务器重新生成清单。
-
-两节点还应核对 `cluster.env` 字节完全一致：
+源码 SHA 校验已经取消。这里仅确认两节点使用相同 `cluster.env`：
 
 ```bash
 sha256sum configs/cluster.env
 ```
 
-把两边输出进行比较；必须相同。
+把两边输出进行比较；必须相同。这个 SHA 由命令自动计算，只用于比较配置，
+不需要抄入任何环境变量，也不会成为源码门禁。
 
 ## 9. 两节点预检和 HCCN 点对点连通
 
@@ -598,7 +568,7 @@ bash scripts/19_stop_node.sh \
 
 | 阶段 | 终端成功标志 | 主要证据位置 |
 | --- | --- | --- |
-| 源码 | `SOURCE_MANIFEST_OK` | `SOURCE_MANIFEST.json` |
+| 源码 | 所需脚本存在且 `bash -n` 成功 | 两节点的 `expert_load/` 目录 |
 | 预检 | `PREFLIGHT_OK` | `${RUN_HOST_ROOT}/preflight/` |
 | HCCN ping | `HCCN_PING_OK` | `${RUN_HOST_ROOT}/connectivity/` |
 | 镜像 | `PULL_OK` | `${RUN_HOST_ROOT}/image-manifests/` 和 `gates/node*/image.gate` |
@@ -618,8 +588,7 @@ bash scripts/19_stop_node.sh \
 | Docker socket `permission denied` | 当前用户无 daemon 权限 | 使用管理员分配的 Docker 用户/组；不要 chmod socket |
 | Quay `context deadline exceeded` | Docker daemon 到 registry 网络不通/未走代理 | 配 daemon 代理，或在可拉取节点 `docker save` 后传输 |
 | `curl .../v2/` 返回 401 | 已到 registry API，但匿名请求被 challenge | 不等同于网络失败；继续检查实际 `docker pull` 和 daemon 代理 |
-| `source manifest SHA-256 mismatch` | 常见为错把 tarball SHA 填入配置 | 先无 expected 验证，再比较 trusted manifest SHA；无需动模型 |
-| `source file SHA-256 mismatch for ...` | 源码文件变动/混包 | 重新核对 tarball SHA 并解压干净包，不在远端 generate |
+| 仍提示 `SOURCE_MANIFEST_SHA256` 或 source manifest | 远端还是旧版脚本 | 重新同步当前 `expert_load/`；新脚本没有源码 SHA 门禁 |
 | `missing preflight/hccn gate` | 当前配置尚未跑门禁，或配置改过 | 两节点按顺序重跑 00、01 |
 | image gate 的 ID 不同 | 两节点镜像内容不同 | 传输同一镜像 tar，重新执行 02 |
 | `revision-bound download state is missing` | 现有模型尚未接管 | node0 运行 `03_download_model.sh ... --adopt-existing` |

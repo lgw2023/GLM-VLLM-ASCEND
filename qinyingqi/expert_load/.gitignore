@@ -6,6 +6,7 @@
 /configs/remote_npu_ips.txt.*
 !/configs/remote_npu_ips.txt.example
 /.client-venv/
+/glm52-expert-load-source.tar.gz
 
 # Runtime artifacts and large external working trees.
 /artifacts/*
