@@ -79,6 +79,25 @@ class ModelValidationTests(unittest.TestCase):
             self.assertEqual(result["total_tensor_bytes"], 8)
             self.assertEqual(result["safetensors_tensor_count"], 2)
 
+    def test_index_total_size_excludes_rot_safetensors(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.make_model(root)
+            rot_path = root / "rot.safetensors"
+            rot_path.write_bytes(safetensors_bytes("model.rot"))
+            index_path = root / VALIDATOR.INDEX_FILE
+            index = json.loads(index_path.read_text(encoding="utf-8"))
+            index["weight_map"]["model.rot"] = rot_path.name
+            index_path.write_text(json.dumps(index), encoding="utf-8")
+
+            result = self.validate_fixture(root)
+
+            self.assertEqual(result["index_metadata_total_size"], 8)
+            self.assertEqual(result["index_total_covered_tensor_bytes"], 8)
+            self.assertEqual(result["index_total_excluded_shards"], [rot_path.name])
+            self.assertEqual(result["index_total_excluded_tensor_bytes"], 4)
+            self.assertEqual(result["total_tensor_bytes"], 12)
+
     def test_default_mode_enforces_pinned_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -92,6 +111,19 @@ class ModelValidationTests(unittest.TestCase):
             shard_paths = self.make_model(root)
             shard_paths[1].unlink()
             with self.assertRaisesRegex(ValueError, "missing"):
+                self.validate_fixture(root)
+
+    def test_index_header_tensor_mismatch_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.make_model(root)
+            index_path = root / VALIDATOR.INDEX_FILE
+            index = json.loads(index_path.read_text(encoding="utf-8"))
+            shard_name = index["weight_map"].pop("model.a")
+            index["weight_map"]["model.not_a"] = shard_name
+            index_path.write_text(json.dumps(index), encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "index/header mismatch"):
                 self.validate_fixture(root)
 
     def test_wrong_glm_topology_is_rejected(self) -> None:

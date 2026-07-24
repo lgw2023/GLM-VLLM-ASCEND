@@ -29,7 +29,12 @@ QUANT_DESCRIPTION_SHA256 = "3386f968cd7049fe95f896c1a1aeacaa5c1c0659ac2ed9a42cd7
 INDEX_FILE = "quant_model_weights.safetensors.index.json"
 INDEX_SHA256 = "dfa97fa50b5e675ff6cea6ddeae3110795b6b7e971e6dc9cf565a4005fcb079c"
 EXPECTED_SHARD_COUNT = 182
-EXPECTED_TOTAL_TENSOR_BYTES = 773_778_904_680
+INDEX_TOTAL_EXCLUDED_SHARDS = frozenset({"rot.safetensors"})
+EXPECTED_INDEX_TOTAL_SIZE = 773_778_904_680
+EXPECTED_INDEX_TOTAL_EXCLUDED_TENSOR_BYTES = 75_497_472
+EXPECTED_TOTAL_TENSOR_BYTES = (
+    EXPECTED_INDEX_TOTAL_SIZE + EXPECTED_INDEX_TOTAL_EXCLUDED_TENSOR_BYTES
+)
 EXPECTED_TOTAL_SHARD_BYTES = 773_876_016_944
 MAX_SAFETENSORS_HEADER_BYTES = 512 * 1024 * 1024
 
@@ -52,7 +57,9 @@ def load_json_object(path: Path) -> dict[str, Any]:
     return value
 
 
-def validate_safetensors_file(path: Path) -> dict[str, int]:
+def validate_safetensors_file(
+    path: Path,
+) -> tuple[dict[str, int], dict[str, int]]:
     file_size = path.stat().st_size
     if file_size < 16:
         raise ValueError(f"safetensors file is truncated: {path.name}")
@@ -76,7 +83,8 @@ def validate_safetensors_file(path: Path) -> dict[str, int]:
         raise ValueError(f"safetensors header is not an object: {path.name}")
 
     data_bytes = file_size - 8 - header_length
-    tensor_count = 0
+    tensor_sizes: dict[str, int] = {}
+    tensor_ranges: list[tuple[int, int, str]] = []
     for tensor_name, tensor in header.items():
         if tensor_name == "__metadata__":
             continue
@@ -96,15 +104,34 @@ def validate_safetensors_file(path: Path) -> dict[str, int]:
             or offsets[1] > data_bytes
         ):
             raise ValueError(f"invalid tensor offsets/schema in {path.name}: {tensor_name}")
-        tensor_count += 1
-    if tensor_count == 0:
+        start, end = offsets
+        tensor_sizes[tensor_name] = end - start
+        tensor_ranges.append((start, end, tensor_name))
+    if not tensor_sizes:
         raise ValueError(f"safetensors file has no tensor entries: {path.name}")
-    return {
+
+    previous_end = 0
+    for start, end, tensor_name in sorted(tensor_ranges):
+        if start != previous_end:
+            relation = "overlap" if start < previous_end else "gap"
+            raise ValueError(
+                f"safetensors tensor data has a {relation} in {path.name}: "
+                f"{tensor_name} starts at {start}, expected {previous_end}"
+            )
+        previous_end = end
+    if previous_end != data_bytes:
+        raise ValueError(
+            f"safetensors tensor data has a trailing gap in {path.name}: "
+            f"last tensor ends at {previous_end}, payload has {data_bytes} bytes"
+        )
+
+    summary = {
         "file_bytes": file_size,
         "header_bytes": header_length,
         "tensor_data_bytes": data_bytes,
-        "tensor_count": tensor_count,
+        "tensor_count": len(tensor_sizes),
     }
+    return summary, tensor_sizes
 
 
 def validate_model(
@@ -164,13 +191,17 @@ def validate_model(
         raise ValueError("safetensors index has no integer metadata.total_size")
 
     shard_names: list[str] = []
-    for value in weight_map.values():
+    indexed_tensors_by_shard: dict[str, set[str]] = {}
+    for tensor_name, value in weight_map.items():
+        if not isinstance(tensor_name, str) or not tensor_name:
+            raise ValueError(f"safetensors index contains an invalid tensor name: {tensor_name!r}")
         if not isinstance(value, str) or not value.endswith(".safetensors"):
             raise ValueError(f"safetensors index contains an invalid shard name: {value!r}")
         relative = Path(value)
         if relative.is_absolute() or len(relative.parts) != 1 or relative.name != value:
             raise ValueError(f"safetensors shard must stay inside model root: {value!r}")
         shard_names.append(value)
+        indexed_tensors_by_shard.setdefault(value, set()).add(tensor_name)
     unique_shards = sorted(set(shard_names))
     if enforce_pinned_metadata and len(unique_shards) != EXPECTED_SHARD_COUNT:
         raise ValueError(
@@ -188,7 +219,16 @@ def validate_model(
         if not shard_path.is_file():
             missing.append(shard_name)
             continue
-        summary = validate_safetensors_file(shard_path)
+        summary, tensor_sizes = validate_safetensors_file(shard_path)
+        indexed_tensor_names = indexed_tensors_by_shard[shard_name]
+        actual_tensor_names = set(tensor_sizes)
+        missing_tensors = sorted(indexed_tensor_names - actual_tensor_names)
+        unexpected_tensors = sorted(actual_tensor_names - indexed_tensor_names)
+        if missing_tensors or unexpected_tensors:
+            raise ValueError(
+                f"safetensors index/header mismatch in {shard_name}: "
+                f"missing={missing_tensors[:10]}, unexpected={unexpected_tensors[:10]}"
+            )
         shard_summaries[shard_name] = summary
         total_shard_bytes += summary["file_bytes"]
         total_header_bytes += summary["header_bytes"]
@@ -196,12 +236,42 @@ def validate_model(
         total_tensors += summary["tensor_count"]
     if missing:
         raise ValueError(f"indexed safetensors shards are missing: {missing}")
-    if total_tensor_bytes != metadata["total_size"]:
+
+    excluded_shards = sorted(INDEX_TOTAL_EXCLUDED_SHARDS.intersection(shard_summaries))
+    index_total_excluded_tensor_bytes = sum(
+        shard_summaries[shard_name]["tensor_data_bytes"]
+        for shard_name in excluded_shards
+    )
+    index_total_covered_tensor_bytes = (
+        total_tensor_bytes - index_total_excluded_tensor_bytes
+    )
+    if index_total_covered_tensor_bytes != metadata["total_size"]:
         raise ValueError(
-            "indexed tensor byte total mismatch: "
-            f"index={metadata['total_size']}, actual={total_tensor_bytes}"
+            "index metadata tensor byte total mismatch: "
+            f"index={metadata['total_size']}, "
+            f"actual={index_total_covered_tensor_bytes}, "
+            f"excluded_shards={excluded_shards}"
         )
     if enforce_pinned_metadata:
+        if metadata["total_size"] != EXPECTED_INDEX_TOTAL_SIZE:
+            raise ValueError(
+                "pinned index metadata total_size mismatch: "
+                f"expected {EXPECTED_INDEX_TOTAL_SIZE}, got {metadata['total_size']}"
+            )
+        if set(excluded_shards) != INDEX_TOTAL_EXCLUDED_SHARDS:
+            raise ValueError(
+                "pinned index-total-excluded shard mismatch: "
+                f"expected {sorted(INDEX_TOTAL_EXCLUDED_SHARDS)}, got {excluded_shards}"
+            )
+        if (
+            index_total_excluded_tensor_bytes
+            != EXPECTED_INDEX_TOTAL_EXCLUDED_TENSOR_BYTES
+        ):
+            raise ValueError(
+                "pinned index-total-excluded tensor byte total mismatch: "
+                f"expected {EXPECTED_INDEX_TOTAL_EXCLUDED_TENSOR_BYTES}, "
+                f"got {index_total_excluded_tensor_bytes}"
+            )
         if total_tensor_bytes != EXPECTED_TOTAL_TENSOR_BYTES:
             raise ValueError(
                 "pinned tensor byte total mismatch: "
@@ -226,6 +296,10 @@ def validate_model(
         "tensor_count_from_index": len(weight_map),
         "safetensors_tensor_count": total_tensors,
         "shard_count": len(unique_shards),
+        "index_metadata_total_size": metadata["total_size"],
+        "index_total_covered_tensor_bytes": index_total_covered_tensor_bytes,
+        "index_total_excluded_shards": excluded_shards,
+        "index_total_excluded_tensor_bytes": index_total_excluded_tensor_bytes,
         "total_tensor_bytes": total_tensor_bytes,
         "total_shard_bytes": total_shard_bytes,
         "total_safetensors_header_bytes": total_header_bytes,
