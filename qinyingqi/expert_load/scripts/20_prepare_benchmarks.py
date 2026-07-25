@@ -11,7 +11,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import sys
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable
@@ -28,6 +28,8 @@ REMOTE_DATASETS = {
     "swebench_lite": ("princeton-nlp/SWE-bench_Lite", "test"),
     "livecodebench": ("livecodebench/code_generation_lite", "test"),
 }
+PARQUET_BENCHMARKS = {"mmlu_pro", "swebench_lite"}
+LIVECODEBENCH_FILE_PATTERN = re.compile(r"^test(?P<part>[0-9]*)\.jsonl$")
 
 
 def utc_now() -> str:
@@ -209,13 +211,50 @@ RECORD_BUILDERS: dict[str, Callable[[dict[str, Any], int], dict[str, Any]]] = {
 def import_dataset_dependencies() -> tuple[Any, Any, Any]:
     try:
         from datasets import load_dataset
-        from huggingface_hub import HfApi
+        from huggingface_hub import HfApi, hf_hub_url
     except ImportError as exc:
         raise RuntimeError(
             "benchmark preparation requires datasets and huggingface_hub; "
             "install requirements-client.txt in the remote client venv"
         ) from exc
-    return load_dataset, HfApi, sys.modules["datasets"]
+    return load_dataset, HfApi, hf_hub_url
+
+
+def select_dataset_files(
+    benchmark: str, split: str, repository_files: Iterable[str]
+) -> tuple[str, list[str]]:
+    """Select data files without executing a repository dataset script."""
+    files = list(repository_files)
+    if benchmark in PARQUET_BENCHMARKS:
+        prefix = f"data/{split}-"
+        selected = sorted(
+            path
+            for path in files
+            if path.startswith(prefix) and path.endswith(".parquet")
+        )
+        data_format = "parquet"
+    elif benchmark == "livecodebench":
+        if split != "test":
+            raise ValueError("LiveCodeBench direct loader supports only split=test")
+
+        def livecodebench_order(path: str) -> int:
+            match = LIVECODEBENCH_FILE_PATTERN.fullmatch(path)
+            assert match is not None
+            part = match.group("part")
+            return int(part) if part else 1
+
+        selected = sorted(
+            (path for path in files if LIVECODEBENCH_FILE_PATTERN.fullmatch(path)),
+            key=livecodebench_order,
+        )
+        data_format = "json"
+    else:
+        raise ValueError(f"no direct-file loader for benchmark: {benchmark}")
+    if not selected:
+        raise RuntimeError(
+            f"{benchmark} has no direct {data_format} files for split={split}"
+        )
+    return data_format, selected
 
 
 def load_remote_rows(
@@ -223,17 +262,34 @@ def load_remote_rows(
     cache_dir: Path,
     requested_revision: str,
     split_override: str | None,
-) -> tuple[Iterable[dict[str, Any]], dict[str, str]]:
-    load_dataset, hf_api_class, _ = import_dataset_dependencies()
+) -> tuple[Iterable[dict[str, Any]], dict[str, Any]]:
+    load_dataset, hf_api_class, hf_hub_url = import_dataset_dependencies()
     dataset_id, default_split = REMOTE_DATASETS[benchmark]
     split = split_override or default_split
     api = hf_api_class()
     info = api.dataset_info(repo_id=dataset_id, revision=requested_revision)
     resolved_revision = info.sha
-    dataset = load_dataset(
-        dataset_id,
-        split=split,
+    repository_files = api.list_repo_files(
+        repo_id=dataset_id,
+        repo_type="dataset",
         revision=resolved_revision,
+    )
+    data_format, selected_files = select_dataset_files(
+        benchmark, split, repository_files
+    )
+    data_urls = [
+        hf_hub_url(
+            repo_id=dataset_id,
+            filename=path,
+            repo_type="dataset",
+            revision=resolved_revision,
+        )
+        for path in selected_files
+    ]
+    dataset = load_dataset(
+        data_format,
+        data_files={split: data_urls},
+        split=split,
         cache_dir=str(cache_dir),
     )
     return dataset, {
@@ -241,6 +297,9 @@ def load_remote_rows(
         "requested_revision": requested_revision,
         "resolved_revision": resolved_revision,
         "split": split,
+        "data_format": data_format,
+        "data_files": selected_files,
+        "loader_policy": "direct files; repository dataset scripts are never executed",
     }
 
 

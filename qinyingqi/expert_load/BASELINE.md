@@ -10,7 +10,12 @@
 | Hardware | 2 x Atlas 800 A2, each 8 x Ascend 910B1 64 GiB |
 | Model | `Eco-Tech/GLM-5.2-w8a8` |
 
-`quay.io/ascend/vllm-ascend:glm5.2` is a vendor functional-smoke lane. The formal expert-load lane is a derived image built from the locked group source plus the W8A8 route-capture patch. Never merge results from the two lanes without recording image digest and package versions.
+`quay.io/ascend/vllm-ascend:glm5.2` is a vendor functional-smoke lane. The
+formal expert-load lane uses the derived
+`glm52-expert-capture:v0.22.1rc1-w8a8-v1` image, built from
+`quay.io/ascend/vllm-ascend:v0.22.1rc1` by
+`patches/Dockerfile.route-capture`. Never merge results from the two lanes
+without recording image digest and package versions.
 
 The remote nodes intentionally retain no `.git` metadata. Initial bring-up deliberately has no runtime source-content or source-SHA gate: source is copied directly from the group repository so deployment cannot be blocked by a manually transcribed digest. Image identity, package versions, immutable model revision, model validation and run configuration remain recorded. Formal result reports should name the group Git commit used for the run, but that record does not block service startup.
 
@@ -57,6 +62,12 @@ The claim “20% experts handle 90% tokens” is supported only when the assignm
 
 ## Known gate
 
-The OpenAI protocol and `--enable-return-routed-experts` flag exist in vLLM 0.22.1. In the locked Ascend plugin, the common BF16 `FusedMoE.apply` path calls the capturer, but GLM-5.2 W8A8 selects experts inside its quantization method and currently bypasses that call. Consequently, an unpatched W8A8 server can return `null`, empty or zero-filled route data even though the CLI flag is accepted.
+The OpenAI protocol and `--enable-return-routed-experts` flag exist in vLLM
+0.22.1. vLLM binds its route capturer through `FusedMoE.router.capture_fn`, but
+GLM-5.2 W8A8 selects experts inside its quantization method and bypasses the
+normal router path. The derived image inserts a callback to that bound function
+immediately after W8A8 logical `topk_ids` selection. An unpatched W8A8 server
+can return `null`, empty or zero-filled route data even though the CLI flag is
+accepted.
 
 No benchmark run is valid until the derived image passes the route gate in `scripts/12_smoke_request.py --require-routes`.

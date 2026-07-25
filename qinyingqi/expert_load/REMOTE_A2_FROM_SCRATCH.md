@@ -603,28 +603,90 @@ bash scripts/19_stop_node.sh \
 ## 20. 从 vendor smoke 进入 formal expert benchmark
 
 当前 `vendor_smoke` 服务已证明双节点 W8A8 加载和生成可用，但它不是路由实验。
-本次 benchmark 脚本不包含 W8A8 内核捕获实现；当前
-[`patches/README.md`](patches/README.md) 仍是补丁契约。正式采集必须先完成该
-补丁和 route-capture 派生镜像，再把两节点 `cluster.env` 同时切换为：
+不用重新下载模型，也不用先启动一个 `vendor_smoke` 容器。正式 route capture
+需要一次性构建小型派生镜像：官方 `v0.22.1rc1` image 有 vLLM 的返回路由框架，
+但 W8A8 expert selection 没有调用其 router capture callback。项目中的补丁只在
+logical `topk_ids` 产生后插入该 callback。
+
+### 20.1 在 node1 构建并传输 route-capture image
+
+先在 node1：
 
 ```bash
-RUN_PROFILE=expert_capture
-IMAGE_REF=<带 glm52.capture_patch_id label 的派生镜像>
-VLLM_VERSION_OVERRIDE=0.22.1
-ENABLE_ROUTE_CAPTURE=1
-CAPTURE_PATCH_ID=<精确 patch id>
-EXPECTED_VLLM_PACKAGE_VERSION=0.22.1
-EXPECTED_VLLM_ASCEND_PACKAGE_VERSION=0.22.1rc1
-MAX_NUM_SEQS=1
-API_BIND_HOST=127.0.0.1
+PROJECT_ROOT=/data/disk2/glm52-study/GLM-VLLM-ASCEND
+cd "${PROJECT_ROOT}/qinyingqi/expert_load"
+bash scripts/07_build_capture_image.sh --confirm-pull-base
 ```
 
-切换配置后，两节点重新执行 09、10 的 existing-image 门禁。每个新 run 仍必须
-执行 13、14、15；模型权重不需要重新下载。`22_run_benchmark_suite.sh` 会先运行
-严格 route gate，任何缺失、空、零填充或不符合形状的 `routed_experts` 都会让
-采集失败，而不是生成看似正常的统计表。
+预期成功行：
 
-### 20.1 仅在 node0 下载 benchmark routing workload
+```text
+CAPTURE_IMAGE_OK image_ref=glm52-expert-capture:v0.22.1rc1-w8a8-v1 patch_id=glm52-w8a8-logical-topk-v1
+```
+
+仍在 node1 导出，并传到 node0：
+
+```bash
+source configs/cluster.env
+source configs/node.env
+
+export CAPTURE_IMAGE=glm52-expert-capture:v0.22.1rc1-w8a8-v1
+export TRANSFER_DIR="${LOCAL_STATE_ROOT}/capture-image"
+mkdir -p "${TRANSFER_DIR}"
+docker save --output "${TRANSFER_DIR}/glm52-expert-capture-v0.22.1rc1-w8a8-v1.tar" \
+  "${CAPTURE_IMAGE}"
+sha256sum "${TRANSFER_DIR}/glm52-expert-capture-v0.22.1rc1-w8a8-v1.tar" \
+  > "${TRANSFER_DIR}/glm52-expert-capture-v0.22.1rc1-w8a8-v1.tar.sha256"
+
+ssh root@7.150.8.22 'mkdir -p /data/node0_disk2/glm52-study/capture-image'
+scp "${TRANSFER_DIR}/glm52-expert-capture-v0.22.1rc1-w8a8-v1.tar" \
+  "${TRANSFER_DIR}/glm52-expert-capture-v0.22.1rc1-w8a8-v1.tar.sha256" \
+  root@7.150.8.22:/data/node0_disk2/glm52-study/capture-image/
+```
+
+若 node-to-node `scp` 不可用，用团队已可用的内部传输方式传同样两个文件和路径；
+不要重新从 node0 拉 Quay。然后在 node0：
+
+```bash
+PROJECT_ROOT=/data/node0_disk2/glm52-study/GLM-VLLM-ASCEND
+cd /data/node0_disk2/glm52-study/capture-image
+sha256sum -c glm52-expert-capture-v0.22.1rc1-w8a8-v1.tar.sha256
+docker load --input glm52-expert-capture-v0.22.1rc1-w8a8-v1.tar
+docker image inspect glm52-expert-capture:v0.22.1rc1-w8a8-v1 \
+  --format '{{index .Config.Labels "glm52.capture_patch_id"}}'
+```
+
+在 node0、node1 各自的 `PROJECT_ROOT/qinyingqi/expert_load` 内，把各自的
+`configs/cluster.env` 切换到相同的正式配置：
+
+```bash
+sed -i \
+  -e 's|^RUN_PROFILE=.*|RUN_PROFILE=expert_capture|' \
+  -e 's|^IMAGE_REF=.*|IMAGE_REF=glm52-expert-capture:v0.22.1rc1-w8a8-v1|' \
+  -e 's|^VLLM_VERSION_OVERRIDE=.*|VLLM_VERSION_OVERRIDE=0.22.1|' \
+  -e 's|^ENABLE_ROUTE_CAPTURE=.*|ENABLE_ROUTE_CAPTURE=1|' \
+  -e 's|^CAPTURE_PATCH_ID=.*|CAPTURE_PATCH_ID=glm52-w8a8-logical-topk-v1|' \
+  -e 's|^EXPECTED_VLLM_PACKAGE_VERSION=.*|EXPECTED_VLLM_PACKAGE_VERSION=0.22.1|' \
+  -e 's|^EXPECTED_VLLM_ASCEND_PACKAGE_VERSION=.*|EXPECTED_VLLM_ASCEND_PACKAGE_VERSION=0.22.1rc1|' \
+  -e 's|^MAX_NUM_SEQS=.*|MAX_NUM_SEQS=1|' \
+  -e 's|^API_BIND_HOST=.*|API_BIND_HOST=127.0.0.1|' \
+  configs/cluster.env
+```
+
+此时两节点重新执行 09、10 的 `--confirm-existing-image` 门禁。然后按第 12 节建立
+新的 `RUN_ID`，但将 node0 的名称改成：
+
+```bash
+export RUN_ID="expert-capture-$(date -u +%Y%m%dT%H%M%SZ)"
+printf '%s\n' "${RUN_ID}" > "${RUN_HOST_ROOT}/operator/current-run-id"
+```
+
+node1 读取相同 `RUN_ID`。之后两节点按原顺序执行 13、14、15，node0 通过第 15 节
+看到 `SERVICE_READY`。模型权重不需要重新下载。`22_run_benchmark_suite.sh` 会先运行
+严格 route gate，任何缺失、空、零填充或不符合形状的 `routed_experts` 都会让采集
+失败，而不是生成看似正常的统计表。
+
+### 20.2 仅在 node0 下载 benchmark routing workload
 
 数据只写远端。先在 node0 建立或更新 client venv：
 
@@ -643,10 +705,23 @@ bash scripts/20_prepare_benchmarks.sh \
 该命令远端下载并固定 MMLU-Pro、SWE-bench Lite 和 LiveCodeBench 的实际 revision
 SHA；`ruler_niah` 是确定性的 RULER-style NIAH 路由 workload，不是官方 RULER
 分数。网络需要代理时，只对这一下载步骤使用服务器已有的代理配置，不要让
-127.0.0.1 的 API 请求经过代理。`--limit 0` 取完整远端 dataset；先用 50 条
-pilot 确认运行时间和路由质量。
+127.0.0.1 的 API 请求经过代理。实现只读取 Parquet/JSONL 数据文件，不执行数据集
+仓库的 Python script，因而不会报 `Dataset scripts are no longer supported`。`--limit
+0` 取完整远端 dataset；先用 50 条 pilot 确认运行时间和路由质量。它限制写出的请求数，
+不是静态 split 文件的下载字节数；`--ruler-words` 是本地合成 prompt 长度。
 
-### 20.2 路由采集和统计
+若旧版脚本已完成 MMLU-Pro、只在 SWE-bench Lite 失败，更新源码后只重跑尚未完成项：
+
+```bash
+bash scripts/20_prepare_benchmarks.sh \
+  --data-root "${DATA_ROOT}" \
+  --benchmarks swebench_lite,livecodebench,ruler_niah \
+  --limit 50 \
+  --ruler-words 2048 \
+  --overwrite
+```
+
+### 20.3 路由采集和统计
 
 在 node0 已出现 `SERVICE_READY` 后运行：
 
@@ -686,7 +761,7 @@ Jaccard overlap，可直接作为 HBM 热 expert 是否可跨 workload 复用的
 模型、镜像和 `${RUN_HOST_ROOT}/benchmark-data` 已存在时，不需要重复下载。下一次
 仅执行：同步小源码目录到两节点；两节点跑 09、10 的 existing-image 路径；node0
 在必要时只读运行 11；创建新的 `expert-capture-<UTC timestamp>` RUN_ID；两节点
-依次跑 13、14、15，node0 跑 11 等待 `SERVICE_READY`，最后 node0 跑 20.2。结束后
+依次跑 13、14、15，node0 跑 11 等待 `SERVICE_READY`，最后 node0 跑 20.3。结束后
 两节点分别执行 17 的 `19_stop_node.sh --remove`。
 
 不要复用已经启动过的 RUN_ID，也不要把 API URL 改回 `NODE0_COORDINATOR_IP`。

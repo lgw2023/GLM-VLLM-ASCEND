@@ -11,11 +11,13 @@ they do not replace official benchmark scoring harnesses.
 | `ruler_niah` | Deterministic synthetic prompt | RULER-style long-context sensitivity |
 
 `20_prepare_benchmarks.py` resolves each Hugging Face dataset revision to an
-immutable SHA and writes canonical JSONL inputs plus a manifest under the remote
-data root. `ruler_niah` is intentionally labelled as a routing workload rather
-than an official RULER score. tau2-bench and full OpenHands trajectories can use
-the same canonical JSONL format once an adapter exports their real multi-turn
-messages; do not replace them with fabricated tool traces.
+immutable SHA, selects only static Parquet/JSONL data files, and writes
+canonical JSONL inputs plus a manifest under the remote data root. It never
+executes a dataset repository script, so it remains compatible with current
+`datasets` releases. `ruler_niah` is intentionally labelled as a routing
+workload rather than an official RULER score. tau2-bench and full OpenHands
+trajectories can use the same canonical JSONL format once an adapter exports
+their real multi-turn messages; do not replace them with fabricated tool traces.
 
 No benchmark data, prompt capture, or route artifact belongs in the source sync.
 Use `scripts/22_run_benchmark_suite.sh` only after the W8A8 route gate passes.

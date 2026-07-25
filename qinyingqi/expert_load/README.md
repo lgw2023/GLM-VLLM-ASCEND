@@ -193,21 +193,81 @@ bash scripts/19_stop_node.sh configs/cluster.env configs/node.env --remove
 
 ### 10.1 先准备 route-capture 派生镜像
 
-本次新增的是 benchmark 客户端和分析链路，不包含 W8A8 内核捕获实现；当前
-[`patches/README.md`](patches/README.md) 仍是补丁契约。必须先按该契约实现补丁、
-构建并在两节点导入同一个 route-capture 派生镜像，才能把两节点完全相同的
-`cluster.env` 切换为：
+正式实验使用的不是之前已经停止的 `vendor_smoke` 容器。官方
+`quay.io/ascend/vllm-ascend:v0.22.1rc1` 已包含 vLLM 的 route-return 框架，但其
+W8A8 路径绕过了已绑定的 router capture callback。本项目的派生镜像只在
+`w8a8_dynamic.py` 的 logical `topk_ids` 选择后插入一次 callback；不复制模型，
+不修改模型权重。
+
+先在能访问 Quay 的 **node1** 运行。node1 若已经有该 base image，可以去掉
+`--confirm-pull-base`：
 
 ```bash
-RUN_PROFILE=expert_capture
-IMAGE_REF=<带 glm52.capture_patch_id label 的派生镜像>
-VLLM_VERSION_OVERRIDE=0.22.1
-ENABLE_ROUTE_CAPTURE=1
-CAPTURE_PATCH_ID=<派生镜像中的精确 patch id>
-EXPECTED_VLLM_PACKAGE_VERSION=0.22.1
-EXPECTED_VLLM_ASCEND_PACKAGE_VERSION=0.22.1rc1
-MAX_NUM_SEQS=1
-API_BIND_HOST=127.0.0.1
+cd "${PROJECT_ROOT}/qinyingqi/expert_load"
+bash scripts/07_build_capture_image.sh --confirm-pull-base
+```
+
+成功时必须出现：
+
+```text
+CAPTURE_IMAGE_OK image_ref=glm52-expert-capture:v0.22.1rc1-w8a8-v1 patch_id=glm52-w8a8-logical-topk-v1
+```
+
+随后仍在 node1 导出派生镜像：
+
+```bash
+source configs/cluster.env
+source configs/node.env
+
+export CAPTURE_IMAGE=glm52-expert-capture:v0.22.1rc1-w8a8-v1
+export TRANSFER_DIR="${LOCAL_STATE_ROOT}/capture-image"
+mkdir -p "${TRANSFER_DIR}"
+
+docker save --output "${TRANSFER_DIR}/glm52-expert-capture-v0.22.1rc1-w8a8-v1.tar" \
+  "${CAPTURE_IMAGE}"
+sha256sum "${TRANSFER_DIR}/glm52-expert-capture-v0.22.1rc1-w8a8-v1.tar" \
+  > "${TRANSFER_DIR}/glm52-expert-capture-v0.22.1rc1-w8a8-v1.tar.sha256"
+```
+
+把这两个文件通过已可用的节点内传输方式送到 node0 的
+`/data/node0_disk2/glm52-study/capture-image/`。如果 node1 可以直接 SSH 到 node0，
+可使用：
+
+```bash
+ssh root@7.150.8.22 'mkdir -p /data/node0_disk2/glm52-study/capture-image'
+scp "${TRANSFER_DIR}/glm52-expert-capture-v0.22.1rc1-w8a8-v1.tar" \
+  "${TRANSFER_DIR}/glm52-expert-capture-v0.22.1rc1-w8a8-v1.tar.sha256" \
+  root@7.150.8.22:/data/node0_disk2/glm52-study/capture-image/
+```
+
+在 **node0** 导入并核对：
+
+```bash
+cd /data/node0_disk2/glm52-study/capture-image
+sha256sum -c glm52-expert-capture-v0.22.1rc1-w8a8-v1.tar.sha256
+docker load --input glm52-expert-capture-v0.22.1rc1-w8a8-v1.tar
+docker image inspect glm52-expert-capture:v0.22.1rc1-w8a8-v1 \
+  --format '{{index .Config.Labels "glm52.capture_patch_id"}}'
+```
+
+最后在两节点各自的 `configs/cluster.env` 执行下列命令。不要复制 `node.env`，只有
+`cluster.env` 应保持一致：
+
+```bash
+sed -i \
+  -e 's|^RUN_PROFILE=.*|RUN_PROFILE=expert_capture|' \
+  -e 's|^IMAGE_REF=.*|IMAGE_REF=glm52-expert-capture:v0.22.1rc1-w8a8-v1|' \
+  -e 's|^VLLM_VERSION_OVERRIDE=.*|VLLM_VERSION_OVERRIDE=0.22.1|' \
+  -e 's|^ENABLE_ROUTE_CAPTURE=.*|ENABLE_ROUTE_CAPTURE=1|' \
+  -e 's|^CAPTURE_PATCH_ID=.*|CAPTURE_PATCH_ID=glm52-w8a8-logical-topk-v1|' \
+  -e 's|^EXPECTED_VLLM_PACKAGE_VERSION=.*|EXPECTED_VLLM_PACKAGE_VERSION=0.22.1|' \
+  -e 's|^EXPECTED_VLLM_ASCEND_PACKAGE_VERSION=.*|EXPECTED_VLLM_ASCEND_PACKAGE_VERSION=0.22.1rc1|' \
+  -e 's|^MAX_NUM_SEQS=.*|MAX_NUM_SEQS=1|' \
+  -e 's|^API_BIND_HOST=.*|API_BIND_HOST=127.0.0.1|' \
+  configs/cluster.env
+
+grep -E '^(RUN_PROFILE|IMAGE_REF|VLLM_VERSION_OVERRIDE|ENABLE_ROUTE_CAPTURE|CAPTURE_PATCH_ID|EXPECTED_VLLM_PACKAGE_VERSION|EXPECTED_VLLM_ASCEND_PACKAGE_VERSION|MAX_NUM_SEQS|API_BIND_HOST)=' \
+  configs/cluster.env
 ```
 
 修改 `cluster.env` 后，两节点重新执行 00、01、02；随后每次新 run 仍执行 05、06。
@@ -236,8 +296,26 @@ bash scripts/20_prepare_benchmarks.sh \
 若下载节点需要代理，只对上述下载命令使用服务器已配置的网络方式。不要让
 loopback API 采集经由 HTTP 代理；后续脚本会显式直连 `127.0.0.1`。每个 Hugging
 Face 数据集在下载时解析并记录不可变 revision SHA 到
-`${DATA_ROOT}/manifests/`。`--limit 0` 表示取完整远端 dataset；先用 50 条 pilot
-确认路由质量和运行时间。
+`${DATA_ROOT}/manifests/`。脚本直接加载 MMLU-Pro/SWE-bench Lite 的 Parquet 和
+LiveCodeBench 的 JSONL 文件，绝不执行仓库中的 dataset script，因此不会触发
+`Dataset scripts are no longer supported`。
+
+`--limit 50` 只限制每个 workload 写出的 JSONL 请求数，不是下载字节上限；数据集
+loader 仍会将选定 split 的静态文件缓存到 node0。`--limit 0` 取远端 dataset 的全部
+rows；`ruler_niah` 没有远端全量集，`--limit 0` 时固定生成 50 条。`--ruler-words 2048`
+是每条合成 NIAH prompt 的词数，不会下载 RULER 数据。
+
+若旧版本已经写完 MMLU-Pro、但在 SWE-bench Lite 报出上述错误，更新源码后仅重跑
+尚未完成的三个 workload；这不会覆盖已有的 MMLU-Pro 文件：
+
+```bash
+bash scripts/20_prepare_benchmarks.sh \
+  --data-root "${DATA_ROOT}" \
+  --benchmarks swebench_lite,livecodebench,ruler_niah \
+  --limit 50 \
+  --ruler-words 2048 \
+  --overwrite
+```
 
 ### 10.3 新 run 启动、采集和分析
 
