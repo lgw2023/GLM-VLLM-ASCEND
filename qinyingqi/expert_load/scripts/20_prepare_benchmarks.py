@@ -12,7 +12,7 @@ import argparse
 import hashlib
 import json
 import re
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
@@ -64,6 +64,15 @@ def normalize_options(value: Any) -> list[str]:
 def stable_request_id(benchmark: str, source_id: str, index: int) -> str:
     digest = hashlib.sha256(source_id.encode("utf-8")).hexdigest()[:12]
     return f"{benchmark}-{index:06d}-{digest}"
+
+
+def json_scalar(value: Any, field: str) -> str | int | float | bool | None:
+    """Normalize metadata values that dataset builders may decode as dates."""
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, (date, datetime)):
+        return value.isoformat()
+    raise TypeError(f"{field} has unsupported JSON type: {type(value).__name__}")
 
 
 def mmlu_pro_record(row: dict[str, Any], index: int) -> dict[str, Any]:
@@ -159,8 +168,12 @@ def livecodebench_record(row: dict[str, Any], index: int) -> dict[str, Any]:
         "messages": [{"role": "user", "content": prompt}],
         "metadata": {
             "source_id": source_id,
-            "contest_date": row.get("contest_date"),
-            "difficulty": row.get("difficulty"),
+            "contest_date": json_scalar(
+                row.get("contest_date"), "LiveCodeBench contest_date"
+            ),
+            "difficulty": json_scalar(
+                row.get("difficulty"), "LiveCodeBench difficulty"
+            ),
         },
     }
 
@@ -262,6 +275,7 @@ def load_remote_rows(
     cache_dir: Path,
     requested_revision: str,
     split_override: str | None,
+    limit: int = 0,
 ) -> tuple[Iterable[dict[str, Any]], dict[str, Any]]:
     load_dataset, hf_api_class, hf_hub_url = import_dataset_dependencies()
     dataset_id, default_split = REMOTE_DATASETS[benchmark]
@@ -291,6 +305,7 @@ def load_remote_rows(
         data_files={split: data_urls},
         split=split,
         cache_dir=str(cache_dir),
+        streaming=benchmark == "livecodebench" and limit > 0,
     )
     return dataset, {
         "dataset_id": dataset_id,
@@ -300,16 +315,23 @@ def load_remote_rows(
         "data_format": data_format,
         "data_files": selected_files,
         "loader_policy": "direct files; repository dataset scripts are never executed",
+        "streaming": benchmark == "livecodebench" and limit > 0,
     }
 
 
 def write_jsonl(path: Path, records: list[dict[str, Any]]) -> str:
     digest = hashlib.sha256()
-    with path.open("w", encoding="utf-8") as output:
-        for record in records:
-            encoded = json.dumps(record, ensure_ascii=False, sort_keys=True)
-            output.write(encoded + "\n")
-            digest.update((encoded + "\n").encode("utf-8"))
+    temporary_path = path.with_name(f".{path.name}.tmp")
+    try:
+        with temporary_path.open("w", encoding="utf-8") as output:
+            for record in records:
+                encoded = json.dumps(record, ensure_ascii=False, sort_keys=True)
+                output.write(encoded + "\n")
+                digest.update((encoded + "\n").encode("utf-8"))
+        temporary_path.replace(path)
+    except BaseException:
+        temporary_path.unlink(missing_ok=True)
+        raise
     return digest.hexdigest()
 
 
@@ -325,6 +347,7 @@ def prepare_remote_benchmark(
         data_root / "hf-cache",
         revision,
         split_override,
+        limit,
     )
     builder = RECORD_BUILDERS[benchmark]
     records: list[dict[str, Any]] = []

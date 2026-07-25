@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import importlib.util
+import tempfile
 import unittest
+from datetime import date, datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -48,6 +50,40 @@ class PrepareBenchmarkTests(unittest.TestCase):
         second = PREPARE.ruler_niah_record(3, filler_words=64, seed=1024)
         self.assertEqual(first, second)
         self.assertIn(first["metadata"]["needle"], first["messages"][0]["content"])
+
+    def test_livecodebench_dates_are_json_serializable(self) -> None:
+        record = PREPARE.livecodebench_record(
+            {
+                "question_id": "problem-1",
+                "question_content": "Return the sum of two integers.",
+                "contest_date": datetime(2025, 1, 2, 3, 4, tzinfo=timezone.utc),
+                "difficulty": "easy",
+            },
+            0,
+        )
+        self.assertEqual(record["metadata"]["contest_date"], "2025-01-02T03:04:00+00:00")
+        PREPARE.json.dumps(record)
+
+        record = PREPARE.livecodebench_record(
+            {
+                "question_id": "problem-2",
+                "question_content": "Return the product of two integers.",
+                "contest_date": date(2025, 1, 3),
+            },
+            1,
+        )
+        self.assertEqual(record["metadata"]["contest_date"], "2025-01-03")
+
+    def test_jsonl_write_does_not_leave_partial_output(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "input.jsonl"
+            with self.assertRaises(TypeError):
+                PREPARE.write_jsonl(
+                    output,
+                    [{"ok": True}, {"not_json": object()}],
+                )
+            self.assertFalse(output.exists())
+            self.assertFalse((Path(directory) / ".input.jsonl.tmp").exists())
 
     def test_parse_benchmarks_rejects_invalid_names(self) -> None:
         with self.assertRaisesRegex(ValueError, "unsupported"):
@@ -109,7 +145,7 @@ class PrepareBenchmarkTests(unittest.TestCase):
             return_value=(fake_load_dataset, FakeApi, fake_hf_hub_url),
         ):
             rows, source = PREPARE.load_remote_rows(
-                "swebench_lite", Path("/cache"), "main", None
+                "swebench_lite", Path("/cache"), "main", None, limit=50
             )
 
         self.assertEqual(rows, [{"instance_id": "one"}])
@@ -119,6 +155,38 @@ class PrepareBenchmarkTests(unittest.TestCase):
             {"test": ["https://example.invalid/test.parquet"]},
         )
         self.assertEqual(source["data_files"], ["data/test-00000-of-00001.parquet"])
+        self.assertFalse(calls["load_dataset"][1]["streaming"])
+
+    def test_limited_livecodebench_uses_streaming_loader(self) -> None:
+        calls: dict[str, object] = {}
+
+        class FakeApi:
+            def dataset_info(self, **kwargs):
+                return SimpleNamespace(sha="b" * 40)
+
+            def list_repo_files(self, **kwargs):
+                return ["test.jsonl", "test2.jsonl"]
+
+        def fake_hf_hub_url(**kwargs) -> str:
+            return f"https://example.invalid/{kwargs['filename']}"
+
+        def fake_load_dataset(builder: str, **kwargs):
+            calls["load_dataset"] = (builder, kwargs)
+            return iter([{"question_id": "one"}])
+
+        with mock.patch.object(
+            PREPARE,
+            "import_dataset_dependencies",
+            return_value=(fake_load_dataset, FakeApi, fake_hf_hub_url),
+        ):
+            rows, source = PREPARE.load_remote_rows(
+                "livecodebench", Path("/cache"), "main", None, limit=50
+            )
+
+        self.assertEqual(list(rows), [{"question_id": "one"}])
+        self.assertEqual(calls["load_dataset"][0], "json")
+        self.assertTrue(calls["load_dataset"][1]["streaming"])
+        self.assertTrue(source["streaming"])
 
 
 if __name__ == "__main__":

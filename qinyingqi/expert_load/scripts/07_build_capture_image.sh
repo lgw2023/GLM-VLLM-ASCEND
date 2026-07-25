@@ -27,7 +27,8 @@ v0.22.1rc1 release image. Run this on node1 when node1 is the registry-enabled
 node, then docker save/load the resulting image onto node0.
 
 Options:
-  --confirm-pull-base       Pull the official base image before building.
+  --confirm-pull-base       Pull the official base image only when it is absent.
+                            Omit this when the exact base image already exists.
   --base-image IMAGE        Override the official release base image.
   --output-image IMAGE      Derived image tag (default is fixed for this project).
   --patch-id ID             Docker label value (default is fixed for this project).
@@ -69,11 +70,13 @@ require_var BASE_IMAGE
 require_var OUTPUT_IMAGE
 require_var PATCH_ID
 
-if (( PULL_BASE == 1 )); then
+if docker image inspect "${BASE_IMAGE}" >/dev/null 2>&1; then
+    printf 'Using existing base image: %s\n' "${BASE_IMAGE}"
+elif (( PULL_BASE == 1 )); then
     docker pull "${BASE_IMAGE}"
 fi
 docker image inspect "${BASE_IMAGE}" >/dev/null 2>&1 || \
-    die "base image is absent: ${BASE_IMAGE}; rerun with --confirm-pull-base on the registry-enabled node"
+    die "base image is absent: ${BASE_IMAGE}; pull it on a registry-enabled node or docker load an offline copy, then rerun without --confirm-pull-base"
 
 DOCKERFILE="${EXPERT_LOAD_ROOT}/patches/Dockerfile.route-capture"
 PATCH_FILE="${EXPERT_LOAD_ROOT}/patches/apply_w8a8_route_capture.py"

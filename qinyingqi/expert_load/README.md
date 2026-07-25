@@ -207,6 +207,42 @@ cd "${PROJECT_ROOT}/qinyingqi/expert_load"
 bash scripts/07_build_capture_image.sh --confirm-pull-base
 ```
 
+若这里报 `Client.Timeout exceeded while awaiting headers`，这是 Docker daemon 到
+Quay 超时，并非补丁或 NPU 错误，也不是 Quay 401 认证问题。先检查精确 base tag
+是否已经存在：
+
+```bash
+docker image inspect quay.io/ascend/vllm-ascend:v0.22.1rc1 \
+  --format '{{.Id}}'
+```
+
+如果能输出 image ID，直接离线构建；更新后的脚本即使带了 pull flag 也会跳过 pull：
+
+```bash
+bash scripts/07_build_capture_image.sh
+```
+
+如果 inspect 失败，node1 确实缺少 base。`quay.io/ascend/vllm-ascend:glm5.2`
+是 vLLM 0.21 的 vendor smoke image，不能冒充该 base。此时需要管理员恢复 Docker
+daemon 的 registry 网络/镜像代理，或在另一台能拉 Quay 的 **Linux 服务器**上对
+精确 tag 执行 `docker pull`、`docker save`，传到 node1 后 `docker load`。不要在 Mac
+拉这个大镜像。`proxychains4 curl` 成功也不代表 `docker pull` 会走同一代理，因为
+pull 的网络请求由 Docker daemon 发出；不要在多人共用节点自行重启 Docker daemon。
+
+如果 node1 已安装 `skopeo`，可以尝试让用户态进程走现有 proxychains，绕过 daemon
+的 registry 出网：
+
+```bash
+command -v skopeo
+proxychains4 -q skopeo copy --retry-times 5 \
+  docker://quay.io/ascend/vllm-ascend:v0.22.1rc1 \
+  docker-archive:/data/disk2/glm52-study/vllm-ascend-v0.22.1rc1.tar:quay.io/ascend/vllm-ascend:v0.22.1rc1
+docker load --input /data/disk2/glm52-study/vllm-ascend-v0.22.1rc1.tar
+bash scripts/07_build_capture_image.sh
+```
+
+`command -v skopeo` 无输出时不要自行安装系统包，直接走管理员或离线 tar 路径。
+
 成功时必须出现：
 
 ```text
@@ -300,18 +336,20 @@ Face 数据集在下载时解析并记录不可变 revision SHA 到
 LiveCodeBench 的 JSONL 文件，绝不执行仓库中的 dataset script，因此不会触发
 `Dataset scripts are no longer supported`。
 
-`--limit 50` 只限制每个 workload 写出的 JSONL 请求数，不是下载字节上限；数据集
-loader 仍会将选定 split 的静态文件缓存到 node0。`--limit 0` 取远端 dataset 的全部
-rows；`ruler_niah` 没有远端全量集，`--limit 0` 时固定生成 50 条。`--ruler-words 2048`
-是每条合成 NIAH prompt 的词数，不会下载 RULER 数据。
+`--limit 50` 只限制每个 workload 写出的 JSONL 请求数。MMLU-Pro 和 SWE-bench Lite
+仍会缓存选定 split 的 Parquet 文件；LiveCodeBench 在 limit 大于 0 时使用 streaming，
+读够指定行数立即停止，不再先下载并解析六个总计数 GiB 的 JSONL。`--limit 0` 取远端
+dataset 的全部 rows；`ruler_niah` 没有远端全量集，`--limit 0` 时固定生成 50 条。
+`--ruler-words 2048` 是每条合成 NIAH prompt 的词数，不会下载 RULER 数据。
 
-若旧版本已经写完 MMLU-Pro、但在 SWE-bench Lite 报出上述错误，更新源码后仅重跑
-尚未完成的三个 workload；这不会覆盖已有的 MMLU-Pro 文件：
+若日志已经显示 SWE-bench Lite 成功，而 LiveCodeBench 因 `datetime is not JSON
+serializable` 失败，更新源码后仅重跑最后两个 workload；这不会覆盖已有 MMLU-Pro
+和 SWE-bench Lite：
 
 ```bash
 bash scripts/20_prepare_benchmarks.sh \
   --data-root "${DATA_ROOT}" \
-  --benchmarks swebench_lite,livecodebench,ruler_niah \
+  --benchmarks livecodebench,ruler_niah \
   --limit 50 \
   --ruler-words 2048 \
   --overwrite

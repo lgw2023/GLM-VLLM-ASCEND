@@ -618,6 +618,33 @@ cd "${PROJECT_ROOT}/qinyingqi/expert_load"
 bash scripts/07_build_capture_image.sh --confirm-pull-base
 ```
 
+如果 Docker daemon 访问 Quay 超时，先查本地精确 base：
+
+```bash
+docker image inspect quay.io/ascend/vllm-ascend:v0.22.1rc1 \
+  --format '{{.Id}}'
+```
+
+存在时执行 `bash scripts/07_build_capture_image.sh`，完全不联网。不存在时只能恢复
+Docker daemon 的 registry 网络/镜像代理，或在另一台可联网 Linux 服务器把精确的
+`v0.22.1rc1` 通过 `docker save`/`docker load` 导入 node1。vendor
+`quay.io/ascend/vllm-ascend:glm5.2` 不能替代；不要在 Mac 拉镜像，也不要在多人节点
+自行重启 Docker daemon。`proxychains4 curl` 与 daemon 的出网路径不是同一回事。
+
+如果 node1 已有 `skopeo`，可尝试用户态代理拉取并导入：
+
+```bash
+command -v skopeo
+proxychains4 -q skopeo copy --retry-times 5 \
+  docker://quay.io/ascend/vllm-ascend:v0.22.1rc1 \
+  docker-archive:/data/disk2/glm52-study/vllm-ascend-v0.22.1rc1.tar:quay.io/ascend/vllm-ascend:v0.22.1rc1
+docker load --input /data/disk2/glm52-study/vllm-ascend-v0.22.1rc1.tar
+bash scripts/07_build_capture_image.sh
+```
+
+若没有 `skopeo` 或该方式仍超时，不要改用旧 vendor image；走管理员 daemon 代理或
+另一台 Linux 服务器的离线 tar。
+
 预期成功行：
 
 ```text
@@ -707,15 +734,16 @@ SHA；`ruler_niah` 是确定性的 RULER-style NIAH 路由 workload，不是官�
 分数。网络需要代理时，只对这一下载步骤使用服务器已有的代理配置，不要让
 127.0.0.1 的 API 请求经过代理。实现只读取 Parquet/JSONL 数据文件，不执行数据集
 仓库的 Python script，因而不会报 `Dataset scripts are no longer supported`。`--limit
-0` 取完整远端 dataset；先用 50 条 pilot 确认运行时间和路由质量。它限制写出的请求数，
-不是静态 split 文件的下载字节数；`--ruler-words` 是本地合成 prompt 长度。
+0` 取完整远端 dataset；先用 50 条 pilot 确认运行时间和路由质量。有限
+LiveCodeBench 使用 streaming，读够指定数量即停止；`contest_date` 会规范化为
+ISO-8601 字符串。`--ruler-words` 是本地合成 prompt 长度。
 
-若旧版脚本已完成 MMLU-Pro、只在 SWE-bench Lite 失败，更新源码后只重跑尚未完成项：
+若 SWE-bench Lite 已成功、LiveCodeBench 在 JSON 序列化时报错，更新源码后只重跑：
 
 ```bash
 bash scripts/20_prepare_benchmarks.sh \
   --data-root "${DATA_ROOT}" \
-  --benchmarks swebench_lite,livecodebench,ruler_niah \
+  --benchmarks livecodebench,ruler_niah \
   --limit 50 \
   --ruler-words 2048 \
   --overwrite
