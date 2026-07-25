@@ -229,6 +229,12 @@ package_version_from_file() {
     sed -n "s/^${distribution}=//p" "${package_file}" | tail -n 1
 }
 
+package_version_matches_release() {
+    local actual="$1"
+    local expected="$2"
+    [[ "${actual}" == "${expected}" || "${actual}" == "${expected}+"* ]]
+}
+
 require_cluster_image_gate() {
     local current_id
     current_id="$(current_image_id)"

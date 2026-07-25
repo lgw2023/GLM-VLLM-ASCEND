@@ -105,11 +105,13 @@ elif [[ "${RUN_PROFILE}" == expert_capture ]]; then
         die "expert_capture derived image must declare VLLM_VERSION_OVERRIDE=0.22.1"
     [[ "${MODEL_REVISION}" != master && "${MODEL_REVISION}" != main ]] || \
         die "expert_capture requires an immutable MODEL_REVISION"
-    [[ "$(package_version_from_file vllm "${RUN_DIR}/image.packages.txt")" == \
-       "${EXPECTED_VLLM_PACKAGE_VERSION}" ]] || \
+    package_version_matches_release \
+        "$(package_version_from_file vllm "${RUN_DIR}/image.packages.txt")" \
+        "${EXPECTED_VLLM_PACKAGE_VERSION}" || \
         die "expert_capture image has the wrong installed vLLM version"
-    [[ "$(package_version_from_file vllm-ascend "${RUN_DIR}/image.packages.txt")" == \
-       "${EXPECTED_VLLM_ASCEND_PACKAGE_VERSION}" ]] || \
+    package_version_matches_release \
+        "$(package_version_from_file vllm-ascend "${RUN_DIR}/image.packages.txt")" \
+        "${EXPECTED_VLLM_ASCEND_PACKAGE_VERSION}" || \
         die "expert_capture image has the wrong installed vLLM-Ascend version"
     [[ -n "${IMAGE_PATCH_ID}" && "${IMAGE_PATCH_ID}" == "${CAPTURE_PATCH_ID}" ]] || \
         die "expert_capture image label glm52.capture_patch_id does not match CAPTURE_PATCH_ID"

@@ -276,6 +276,7 @@ def load_remote_rows(
     requested_revision: str,
     split_override: str | None,
     limit: int = 0,
+    livecodebench_streaming: bool = True,
 ) -> tuple[Iterable[dict[str, Any]], dict[str, Any]]:
     load_dataset, hf_api_class, hf_hub_url = import_dataset_dependencies()
     dataset_id, default_split = REMOTE_DATASETS[benchmark]
@@ -300,12 +301,17 @@ def load_remote_rows(
         )
         for path in selected_files
     ]
+    use_streaming = (
+        benchmark == "livecodebench"
+        and limit > 0
+        and livecodebench_streaming
+    )
     dataset = load_dataset(
         data_format,
         data_files={split: data_urls},
         split=split,
         cache_dir=str(cache_dir),
-        streaming=benchmark == "livecodebench" and limit > 0,
+        streaming=use_streaming,
     )
     return dataset, {
         "dataset_id": dataset_id,
@@ -315,7 +321,7 @@ def load_remote_rows(
         "data_format": data_format,
         "data_files": selected_files,
         "loader_policy": "direct files; repository dataset scripts are never executed",
-        "streaming": benchmark == "livecodebench" and limit > 0,
+        "streaming": use_streaming,
     }
 
 
@@ -341,6 +347,7 @@ def prepare_remote_benchmark(
     limit: int,
     revision: str,
     split_override: str | None,
+    livecodebench_streaming: bool,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     rows, source = load_remote_rows(
         benchmark,
@@ -348,6 +355,7 @@ def prepare_remote_benchmark(
         revision,
         split_override,
         limit,
+        livecodebench_streaming,
     )
     builder = RECORD_BUILDERS[benchmark]
     records: list[dict[str, Any]] = []
@@ -416,6 +424,16 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--ruler-words", type=int, default=2048)
     parser.add_argument("--seed", type=int, default=1024)
+    parser.add_argument(
+        "--no-livecodebench-streaming",
+        action="store_false",
+        dest="livecodebench_streaming",
+        help=(
+            "Use the non-streaming datasets loader for LiveCodeBench. This reuses "
+            "a previously generated local Arrow cache, but downloads the full split "
+            "if that cache is absent."
+        ),
+    )
     parser.add_argument("--overwrite", action="store_true")
     return parser.parse_args()
 
@@ -450,6 +468,7 @@ def main() -> int:
                 args.limit,
                 args.revision,
                 args.split,
+                args.livecodebench_streaming,
             )
         input_sha256 = write_jsonl(output_path, records)
         manifest = {

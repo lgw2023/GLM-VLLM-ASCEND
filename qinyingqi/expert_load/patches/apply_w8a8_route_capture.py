@@ -36,14 +36,19 @@ def target_path() -> Path:
     return path
 
 
+def matches_release(actual: str, expected: str) -> bool:
+    """Accept PEP 440 local build metadata without weakening the release gate."""
+    return actual == expected or actual.startswith(f"{expected}+")
+
+
 def assert_package_versions() -> None:
     actual_vllm = version("vllm")
     actual_ascend = version("vllm-ascend")
-    if actual_vllm != EXPECTED_VLLM_VERSION:
+    if not matches_release(actual_vllm, EXPECTED_VLLM_VERSION):
         raise RuntimeError(
             f"expected vllm={EXPECTED_VLLM_VERSION}, got {actual_vllm}"
         )
-    if actual_ascend != EXPECTED_VLLM_ASCEND_VERSION:
+    if not matches_release(actual_ascend, EXPECTED_VLLM_ASCEND_VERSION):
         raise RuntimeError(
             "expected vllm-ascend="
             f"{EXPECTED_VLLM_ASCEND_VERSION}, got {actual_ascend}"

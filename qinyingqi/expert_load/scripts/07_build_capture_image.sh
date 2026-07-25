@@ -100,9 +100,13 @@ PACKAGE_LINES="$(docker run --rm --entrypoint python "${OUTPUT_IMAGE}" -c \
 print(f"vllm={version(\"vllm\")}")
 print(f"vllm-ascend={version(\"vllm-ascend\")}")')"
 printf '%s\n' "${PACKAGE_LINES}"
-[[ "$(printf '%s\n' "${PACKAGE_LINES}" | sed -n 's/^vllm=//p')" == "${EXPECTED_VLLM_VERSION}" ]] || \
+ACTUAL_VLLM_VERSION="$(printf '%s\n' "${PACKAGE_LINES}" | sed -n 's/^vllm=//p')"
+ACTUAL_VLLM_ASCEND_VERSION="$(printf '%s\n' "${PACKAGE_LINES}" | sed -n 's/^vllm-ascend=//p')"
+package_version_matches_release \
+    "${ACTUAL_VLLM_VERSION}" "${EXPECTED_VLLM_VERSION}" || \
     die "derived image has unexpected vLLM version"
-[[ "$(printf '%s\n' "${PACKAGE_LINES}" | sed -n 's/^vllm-ascend=//p')" == "${EXPECTED_VLLM_ASCEND_VERSION}" ]] || \
+package_version_matches_release \
+    "${ACTUAL_VLLM_ASCEND_VERSION}" "${EXPECTED_VLLM_ASCEND_VERSION}" || \
     die "derived image has unexpected vLLM-Ascend version"
 
 MARKER_COUNT="$(docker run --rm --entrypoint python "${OUTPUT_IMAGE}" -c \

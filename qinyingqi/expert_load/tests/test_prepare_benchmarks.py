@@ -188,6 +188,41 @@ class PrepareBenchmarkTests(unittest.TestCase):
         self.assertTrue(calls["load_dataset"][1]["streaming"])
         self.assertTrue(source["streaming"])
 
+    def test_livecodebench_can_reuse_non_streaming_cache(self) -> None:
+        calls: dict[str, object] = {}
+
+        class FakeApi:
+            def dataset_info(self, **kwargs):
+                return SimpleNamespace(sha="b" * 40)
+
+            def list_repo_files(self, **kwargs):
+                return ["test.jsonl", "test2.jsonl"]
+
+        def fake_hf_hub_url(**kwargs) -> str:
+            return f"https://example.invalid/{kwargs['filename']}"
+
+        def fake_load_dataset(builder: str, **kwargs):
+            calls["load_dataset"] = (builder, kwargs)
+            return [{"question_id": "one"}]
+
+        with mock.patch.object(
+            PREPARE,
+            "import_dataset_dependencies",
+            return_value=(fake_load_dataset, FakeApi, fake_hf_hub_url),
+        ):
+            rows, source = PREPARE.load_remote_rows(
+                "livecodebench",
+                Path("/cache"),
+                "main",
+                None,
+                limit=50,
+                livecodebench_streaming=False,
+            )
+
+        self.assertEqual(rows, [{"question_id": "one"}])
+        self.assertFalse(calls["load_dataset"][1]["streaming"])
+        self.assertFalse(source["streaming"])
+
 
 if __name__ == "__main__":
     unittest.main()

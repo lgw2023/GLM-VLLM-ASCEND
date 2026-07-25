@@ -4,7 +4,8 @@
 the official `quay.io/ascend/vllm-ascend:v0.22.1rc1` base. The build invokes
 `apply_w8a8_route_capture.py`, which has three hard guards:
 
-- installed packages must be vLLM `0.22.1` and vLLM-Ascend `0.22.1rc1`;
+- installed package releases must be vLLM `0.22.1` and vLLM-Ascend
+  `0.22.1rc1`; PEP 440 local build suffixes such as `0.22.1+empty` are allowed;
 - the unmodified `w8a8_dynamic.py` must match SHA-256
   `1dd59f6f8114e19824d559b99cc4a22fed04e54ff0ecd9e853aa3b6a574699e2`;
 - the hook must appear exactly once before zero-expert handling and force load

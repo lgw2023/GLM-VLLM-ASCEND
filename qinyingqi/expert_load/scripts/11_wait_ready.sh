@@ -68,11 +68,13 @@ for name in ("vllm", "vllm-ascend", "torch", "torch-npu", "transformers"):
     | tee "${RUN_DIR}/container.packages.txt"
 
 if [[ "${RUN_PROFILE}" == expert_capture ]]; then
-    [[ "$(package_version_from_file vllm "${RUN_DIR}/container.packages.txt")" == \
-       "${EXPECTED_VLLM_PACKAGE_VERSION}" ]] || \
+    package_version_matches_release \
+        "$(package_version_from_file vllm "${RUN_DIR}/container.packages.txt")" \
+        "${EXPECTED_VLLM_PACKAGE_VERSION}" || \
         die "ready container has the wrong vLLM version"
-    [[ "$(package_version_from_file vllm-ascend "${RUN_DIR}/container.packages.txt")" == \
-       "${EXPECTED_VLLM_ASCEND_PACKAGE_VERSION}" ]] || \
+    package_version_matches_release \
+        "$(package_version_from_file vllm-ascend "${RUN_DIR}/container.packages.txt")" \
+        "${EXPECTED_VLLM_ASCEND_PACKAGE_VERSION}" || \
         die "ready container has the wrong vLLM-Ascend version"
 fi
 

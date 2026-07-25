@@ -24,6 +24,12 @@ def original_source() -> str:
 
 
 class W8A8RouteCapturePatchTests(unittest.TestCase):
+    def test_release_gate_accepts_only_local_build_suffixes(self) -> None:
+        self.assertTrue(PATCHER.matches_release("0.22.1", "0.22.1"))
+        self.assertTrue(PATCHER.matches_release("0.22.1+empty", "0.22.1"))
+        self.assertFalse(PATCHER.matches_release("0.22.2", "0.22.1"))
+        self.assertFalse(PATCHER.matches_release("0.22.1rc1", "0.22.1"))
+
     def test_patch_inserts_logical_topk_hook_before_remapping(self) -> None:
         patched = PATCHER.patch_source(original_source())
         PATCHER.verify_source(patched)

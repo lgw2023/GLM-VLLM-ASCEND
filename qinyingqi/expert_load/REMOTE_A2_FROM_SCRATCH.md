@@ -651,6 +651,9 @@ bash scripts/07_build_capture_image.sh
 CAPTURE_IMAGE_OK image_ref=glm52-expert-capture:v0.22.1rc1-w8a8-v1 patch_id=glm52-w8a8-logical-topk-v1
 ```
 
+基础镜像可能报告 `vllm=0.22.1+empty`。`+empty` 只是 local-version 构建标记；
+当前脚本接受相同 `0.22.1` release 的 `+...` 后缀，同时继续拒绝其他 release。
+
 仍在 node1 导出，并传到 node0：
 
 ```bash
@@ -748,6 +751,22 @@ bash scripts/20_prepare_benchmarks.sh \
   --ruler-words 2048 \
   --overwrite
 ```
+
+若此前已经看到 `Generating test split: 1055 examples`，之后改用 streaming 时却在
+`us.aws.cdn.hf.co` 遇到自签名证书错误，可复用已经生成的 Arrow cache：
+
+```bash
+bash scripts/20_prepare_benchmarks.sh \
+  --data-root "${DATA_ROOT}" \
+  --benchmarks livecodebench,ruler_niah \
+  --limit 50 \
+  --ruler-words 2048 \
+  --no-livecodebench-streaming \
+  --overwrite
+```
+
+不要删除 `${DATA_ROOT}/hf-cache`。若缓存不存在，应由管理员提供代理 CA PEM，并仅对
+下载命令设置 `REQUESTS_CA_BUNDLE`、`SSL_CERT_FILE`；不要关闭 TLS 校验。
 
 ### 20.3 路由采集和统计
 

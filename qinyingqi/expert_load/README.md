@@ -249,6 +249,10 @@ bash scripts/07_build_capture_image.sh
 CAPTURE_IMAGE_OK image_ref=glm52-expert-capture:v0.22.1rc1-w8a8-v1 patch_id=glm52-w8a8-logical-topk-v1
 ```
 
+官方镜像中的 `vllm` 版本可能显示为 `0.22.1+empty`。`+empty` 是 PEP 440
+local-version 构建标记，release 仍是 `0.22.1`；构建、启动和 readiness 门禁均接受
+`0.22.1` 或 `0.22.1+...`，但仍拒绝 `0.22.2`、`0.22.1rc1` 等其他 release。
+
 随后仍在 node1 导出派生镜像：
 
 ```bash
@@ -354,6 +358,26 @@ bash scripts/20_prepare_benchmarks.sh \
   --ruler-words 2048 \
   --overwrite
 ```
+
+如果更换为 streaming 后在 `us.aws.cdn.hf.co` 报
+`CERTIFICATE_VERIFY_FAILED: self signed certificate in certificate chain`，但之前的日志
+已经出现 `Generating test split: 1055 examples`，说明完整的非 streaming Arrow
+cache 已经生成。直接复用它，不再访问 CDN：
+
+```bash
+bash scripts/20_prepare_benchmarks.sh \
+  --data-root "${DATA_ROOT}" \
+  --benchmarks livecodebench,ruler_niah \
+  --limit 50 \
+  --ruler-words 2048 \
+  --no-livecodebench-streaming \
+  --overwrite
+```
+
+这个恢复命令成立的前提是没有删除 `${DATA_ROOT}/hf-cache`。如果缓存不存在，
+non-streaming loader 会重新下载完整 split；此时应向管理员取得服务器代理的 CA PEM，
+再对下载命令设置 `REQUESTS_CA_BUNDLE=/实际路径/ca.pem` 和
+`SSL_CERT_FILE=/实际路径/ca.pem`。不要通过关闭 TLS 校验绕过证书错误。
 
 ### 10.3 新 run 启动、采集和分析
 
