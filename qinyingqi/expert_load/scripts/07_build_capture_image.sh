@@ -97,8 +97,8 @@ ACTUAL_PATCH_ID="$(docker image inspect "${OUTPUT_IMAGE}" \
 
 PACKAGE_LINES="$(docker run --rm --entrypoint python "${OUTPUT_IMAGE}" -c \
     'from importlib.metadata import version
-print(f"vllm={version(\"vllm\")}")
-print(f"vllm-ascend={version(\"vllm-ascend\")}")')"
+print("vllm=" + version("vllm"))
+print("vllm-ascend=" + version("vllm-ascend"))')"
 printf '%s\n' "${PACKAGE_LINES}"
 ACTUAL_VLLM_VERSION="$(printf '%s\n' "${PACKAGE_LINES}" | sed -n 's/^vllm=//p')"
 ACTUAL_VLLM_ASCEND_VERSION="$(printf '%s\n' "${PACKAGE_LINES}" | sed -n 's/^vllm-ascend=//p')"
