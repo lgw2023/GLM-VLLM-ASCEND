@@ -13,6 +13,7 @@ import os
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 from pathlib import Path
@@ -333,7 +334,14 @@ def post_json(
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+        hostname = urllib.parse.urlparse(url).hostname
+        if hostname in {"127.0.0.1", "localhost", "::1"}:
+            # A managed-server HTTP proxy must never receive loopback API traffic.
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+            response_context = opener.open(request, timeout=timeout_seconds)
+        else:
+            response_context = urllib.request.urlopen(request, timeout=timeout_seconds)
+        with response_context as response:
             status = response.status
             body = response.read()
     except urllib.error.HTTPError as exc:

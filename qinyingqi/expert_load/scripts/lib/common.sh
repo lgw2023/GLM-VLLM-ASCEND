@@ -64,12 +64,15 @@ load_configs() {
     source "${cluster_config}"
     # shellcheck disable=SC1090
     source "${node_config}"
+    # The API is intentionally local-only. It is independent of the HCCL/Gloo
+    # coordinator address and remains compatible with older local configs.
+    : "${API_BIND_HOST:=127.0.0.1}"
     validate_config
 }
 
 validate_config() {
     local required=(
-        CLUSTER_NAME NODE0_COORDINATOR_IP
+        CLUSTER_NAME NODE0_COORDINATOR_IP API_BIND_HOST
         MODEL_ID MODEL_REVISION MODEL_CONTAINER_PATH
         RUN_PROFILE IMAGE_REF ENABLE_ROUTE_CAPTURE SERVED_MODEL_NAME API_PORT DP_RPC_PORT
         EXPECTED_VLLM_PACKAGE_VERSION EXPECTED_VLLM_ASCEND_PACKAGE_VERSION CAPTURE_PATCH_ID
@@ -109,6 +112,8 @@ validate_config() {
         die "RUN_PROFILE must be vendor_smoke or expert_capture"
     [[ "${ENABLE_ROUTE_CAPTURE:-0}" == 0 || "${ENABLE_ROUTE_CAPTURE:-0}" == 1 ]] || \
         die "ENABLE_ROUTE_CAPTURE must be 0 or 1"
+    [[ "${API_BIND_HOST}" == 127.0.0.1 ]] || \
+        die "API_BIND_HOST must be 127.0.0.1 on these managed servers"
     ensure_data_path "${MODEL_HOST_PATH}" MODEL_HOST_PATH
     ensure_data_path "${RUN_HOST_ROOT}" RUN_HOST_ROOT
     ensure_data_path "${LOCAL_STATE_ROOT}" LOCAL_STATE_ROOT

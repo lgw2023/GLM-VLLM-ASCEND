@@ -52,6 +52,34 @@ def valid_response() -> tuple[dict, np.ndarray]:
 
 
 class RouteValidationTests(unittest.TestCase):
+    def test_loopback_request_bypasses_environment_proxy(self) -> None:
+        class FakeResponse:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc_value, traceback):
+                return False
+
+            def read(self) -> bytes:
+                return b'{"id": "response"}'
+
+        with mock.patch.object(SMOKE.urllib.request, "build_opener") as build_opener:
+            with mock.patch.object(SMOKE.urllib.request, "urlopen") as urlopen:
+                build_opener.return_value.open.return_value = FakeResponse()
+                status, response = SMOKE.post_json(
+                    "http://127.0.0.1:7000/v1/chat/completions",
+                    {"model": "glm-52"},
+                    "proxy-test",
+                    "EMPTY",
+                    1,
+                )
+        self.assertEqual(status, 200)
+        self.assertEqual(response["id"], "response")
+        build_opener.assert_called_once()
+        urlopen.assert_not_called()
+
     def test_valid_routes_and_phase_boundary(self) -> None:
         response, expected = valid_response()
         routes, summary = SMOKE.validate_response(

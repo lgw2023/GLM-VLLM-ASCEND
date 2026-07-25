@@ -201,7 +201,7 @@ SERVICE_ARGS=(
 )
 
 if [[ "${NODE_RANK}" == 0 ]]; then
-    SERVICE_ARGS+=(--host "${LOCAL_IP}" --port "${API_PORT}" --api-server-count 1)
+    SERVICE_ARGS+=(--host "${API_BIND_HOST}" --port "${API_PORT}" --api-server-count 1)
 else
     SERVICE_ARGS+=(--headless --data-parallel-start-rank 1)
 fi

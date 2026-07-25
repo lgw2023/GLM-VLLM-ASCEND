@@ -25,6 +25,8 @@ capture 门禁通过后再运行。
   和 `/dev/davinci*`；不要使用 NVIDIA、CUDA 或 NCCL 命令。
 - `7.150.8.22` 和 `7.150.15.14` 是 SSH 管理入口，不自动等于
   `LOCAL_IP`、`PEER_IP` 或 `NODE0_COORDINATOR_IP`。
+- API 不通过上述管理或 HCCL/Gloo 地址访问。node0 的 API 固定绑定
+  `API_BIND_HOST=127.0.0.1`，所有本机 client 使用该 loopback 地址。
 - 服务器禁止保留 `.git`；直接同步 `qinyingqi/expert_load/` 子目录即可。
 - 模型已经存在，不运行 ModelScope 下载；node0 用 `--adopt-existing` 只读校验。
 - 服务器占卡/保活由操作者人工处理。本项目不启动、停止或恢复任何维护脚本。
@@ -195,6 +197,7 @@ cp configs/cluster.env.example configs/cluster.env
 ```bash
 CLUSTER_NAME=glm52-a2-2x8
 NODE0_COORDINATOR_IP=<node0通信IP>
+API_BIND_HOST=127.0.0.1
 
 MODEL_ID=Eco-Tech/GLM-5.2-w8a8
 MODEL_REVISION=edd93687ef1c3417d0b92e2cd01cf67e9e9c0039
@@ -361,7 +364,7 @@ HCCN_PING_OK
 ```
 
 脚本会在共享 `RUN_HOST_ROOT/gates/node0` 和 `node1` 写门禁。之后只要修改
-`cluster.env`、`node.env` 或源码清单，就必须在对应节点重跑 00 和 01。
+`cluster.env`、`node.env` 或启动相关源码，就必须在对应节点重跑 00 和 01。
 
 ## 10. 准备两节点完全相同的 Ascend 镜像
 
@@ -544,7 +547,7 @@ python3 -m venv .client-venv
 .client-venv/bin/pip install -r requirements-client.txt
 
 .client-venv/bin/python scripts/12_smoke_request.py \
-  --base-url "http://${NODE0_COORDINATOR_IP}:${API_PORT}/v1" \
+  --base-url "http://${API_BIND_HOST:-127.0.0.1}:${API_PORT}/v1" \
   --model "${SERVED_MODEL_NAME}" \
   --output-dir "${RUN_HOST_ROOT}/${RUN_ID}/client-smoke"
 ```
@@ -597,22 +600,93 @@ bash scripts/19_stop_node.sh \
 | 发现其他 NPU 容器 | daemon 上存在其他容器，不代表只能有一个 | 不操作他人容器；确认卡归属和显存占用后再继续 |
 | API 长时间未 ready | 模型仍加载、容器退出、HCCL 或内存错误 | 查看两节点本轮容器日志和 `${RUN_ID}` 证据，不盲目重启 |
 
-## 20. 从 vendor smoke 进入 expert benchmark 的门禁
+## 20. 从 vendor smoke 进入 formal expert benchmark
 
-当前代码只能完成可靠的服务基线，还不能生成可用于论文/汇报的 expert-load
-分布。正式实验至少还需完成：
+当前 `vendor_smoke` 服务已证明双节点 W8A8 加载和生成可用，但它不是路由实验。
+本次 benchmark 脚本不包含 W8A8 内核捕获实现；当前
+[`patches/README.md`](patches/README.md) 仍是补丁契约。正式采集必须先完成该
+补丁和 route-capture 派生镜像，再把两节点 `cluster.env` 同时切换为：
 
-1. 构建与锁定 GLM-5.2 W8A8 route-capture 派生镜像；
-2. 服务启用 `--enable-return-routed-experts`，并用
-   `12_smoke_request.py --require-routes` 验证返回真实、非空的 logical expert ID；
-3. 在远端固定版本下载 benchmark，至少覆盖通用知识/推理、代码任务、长上下文、
-   agent tool-use 和 SWE/OpenHands 类任务；
-4. 为每个样本保存 benchmark、split、sample ID、request ID、prompt/completion
-   token、逐 token/逐层 top-8 expert ID、并发度、seed 和运行版本；
-5. 分 benchmark 统计 expert assignment share、top-20% share、达到 90% 所需最小
-   expert 数，并报告层间与 prefill/decode 差异；
-6. route gate 未通过前，不批量下载和运行 benchmark，避免只得到文本结果却无法
-   回答 expert 负载问题。
+```bash
+RUN_PROFILE=expert_capture
+IMAGE_REF=<带 glm52.capture_patch_id label 的派生镜像>
+VLLM_VERSION_OVERRIDE=0.22.1
+ENABLE_ROUTE_CAPTURE=1
+CAPTURE_PATCH_ID=<精确 patch id>
+EXPECTED_VLLM_PACKAGE_VERSION=0.22.1
+EXPECTED_VLLM_ASCEND_PACKAGE_VERSION=0.22.1rc1
+MAX_NUM_SEQS=1
+API_BIND_HOST=127.0.0.1
+```
 
-也就是说，本手册跑通后得到的是后续实验的可信运行底座，而不是提前宣称
-“20% expert 处理 90% token”的结论。
+切换配置后，两节点重新执行 09、10 的 existing-image 门禁。每个新 run 仍必须
+执行 13、14、15；模型权重不需要重新下载。`22_run_benchmark_suite.sh` 会先运行
+严格 route gate，任何缺失、空、零填充或不符合形状的 `routed_experts` 都会让
+采集失败，而不是生成看似正常的统计表。
+
+### 20.1 仅在 node0 下载 benchmark routing workload
+
+数据只写远端。先在 node0 建立或更新 client venv：
+
+```bash
+python3 -m venv .client-venv
+.client-venv/bin/pip install -r requirements-client.txt
+
+export DATA_ROOT="${RUN_HOST_ROOT}/benchmark-data"
+bash scripts/20_prepare_benchmarks.sh \
+  --data-root "${DATA_ROOT}" \
+  --benchmarks mmlu_pro,swebench_lite,livecodebench,ruler_niah \
+  --limit 50 \
+  --ruler-words 2048
+```
+
+该命令远端下载并固定 MMLU-Pro、SWE-bench Lite 和 LiveCodeBench 的实际 revision
+SHA；`ruler_niah` 是确定性的 RULER-style NIAH 路由 workload，不是官方 RULER
+分数。网络需要代理时，只对这一下载步骤使用服务器已有的代理配置，不要让
+127.0.0.1 的 API 请求经过代理。`--limit 0` 取完整远端 dataset；先用 50 条
+pilot 确认运行时间和路由质量。
+
+### 20.2 路由采集和统计
+
+在 node0 已出现 `SERVICE_READY` 后运行：
+
+```bash
+export DATA_ROOT="${RUN_HOST_ROOT}/benchmark-data"
+
+bash scripts/22_run_benchmark_suite.sh \
+  configs/cluster.env configs/node.env \
+  --data-root "${DATA_ROOT}" \
+  --benchmarks mmlu_pro,swebench_lite,livecodebench,ruler_niah \
+  --max-requests 50 \
+  --max-tokens 16
+```
+
+采集顺序固定为单并发。每条请求保存原始 request/response、逐 token
+`routes.npy`、prompt/completion token 数、route SHA-256 和 latency；中断后以
+相同参数添加 `--resume`。自动统计结果位于：
+
+```text
+${RUN_HOST_ROOT}/${RUN_ID}/node0/benchmarks/
+  captures/<benchmark>/routes/*.npy
+  captures/<benchmark>/aggregate-counts.npz
+  analysis/per-layer-metrics.csv
+  analysis/expert-rankings.csv
+  analysis/workload-summary.csv
+  analysis/hot-set-overlap.csv
+  analysis/analysis-summary.json
+```
+
+`top51_assignment_share` 是每层最热 51 个 logical experts（严格 20%）承担的
+token-expert assignments 比例。只有 `k90 <= 51` 才支持该层的“20% experts 覆盖
+90% assignments”结论。`hot-set-overlap.csv` 报告不同 workload 同层 top-51 的
+Jaccard overlap，可直接作为 HBM 热 expert 是否可跨 workload 复用的先验。
+
+## 21. 下次直接启动并运行 benchmark
+
+模型、镜像和 `${RUN_HOST_ROOT}/benchmark-data` 已存在时，不需要重复下载。下一次
+仅执行：同步小源码目录到两节点；两节点跑 09、10 的 existing-image 路径；node0
+在必要时只读运行 11；创建新的 `expert-capture-<UTC timestamp>` RUN_ID；两节点
+依次跑 13、14、15，node0 跑 11 等待 `SERVICE_READY`，最后 node0 跑 20.2。结束后
+两节点分别执行 17 的 `19_stop_node.sh --remove`。
+
+不要复用已经启动过的 RUN_ID，也不要把 API URL 改回 `NODE0_COORDINATOR_IP`。

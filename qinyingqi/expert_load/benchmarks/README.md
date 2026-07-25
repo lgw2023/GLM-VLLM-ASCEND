@@ -1,6 +1,21 @@
-# Benchmark Stage
+# Benchmark Routing Workloads
 
-Benchmark repositories and datasets are intentionally not part of the first sync. They will be pinned after the W8A8 route gate passes.
+The tracked scripts prepare remote-only prompt workloads and capture expert routes;
+they do not replace official benchmark scoring harnesses.
 
-Planned first cells are MMLU-Pro (general reasoning), LiveCodeBench (coding), RULER at 8K/16K/32K (context sensitivity), tau2-bench (tool-use agent), and a five-task OpenHands/SWE smoke (software-engineering agent). Repositories live under ignored `benchmarks/repos/`; only exact commit manifests and adapters will be tracked here.
+| Workload | Source | Routing purpose |
+| --- | --- | --- |
+| `mmlu_pro` | `TIGER-Lab/MMLU-Pro` | General knowledge and reasoning |
+| `swebench_lite` | `princeton-nlp/SWE-bench_Lite` | Software-engineering issue diagnosis |
+| `livecodebench` | `livecodebench/code_generation_lite` | Programming problem solving |
+| `ruler_niah` | Deterministic synthetic prompt | RULER-style long-context sensitivity |
 
+`20_prepare_benchmarks.py` resolves each Hugging Face dataset revision to an
+immutable SHA and writes canonical JSONL inputs plus a manifest under the remote
+data root. `ruler_niah` is intentionally labelled as a routing workload rather
+than an official RULER score. tau2-bench and full OpenHands trajectories can use
+the same canonical JSONL format once an adapter exports their real multi-turn
+messages; do not replace them with fabricated tool traces.
+
+No benchmark data, prompt capture, or route artifact belongs in the source sync.
+Use `scripts/22_run_benchmark_suite.sh` only after the W8A8 route gate passes.

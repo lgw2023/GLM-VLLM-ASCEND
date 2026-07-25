@@ -36,12 +36,12 @@ trap stop_on_readiness_failure EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-HEALTH_URL="http://${NODE0_COORDINATOR_IP}:${API_PORT}/health"
-MODELS_URL="http://${NODE0_COORDINATOR_IP}:${API_PORT}/v1/models"
+HEALTH_URL="http://${API_BIND_HOST}:${API_PORT}/health"
+MODELS_URL="http://${API_BIND_HOST}:${API_PORT}/v1/models"
 START_SECONDS="$(date +%s)"
 
 while true; do
-    if curl -fsS --max-time 10 "${HEALTH_URL}" >"${RUN_DIR}/health.response"; then
+    if curl --noproxy '*' -fsS --max-time 10 "${HEALTH_URL}" >"${RUN_DIR}/health.response"; then
         break
     fi
     if ! container_is_running "${CONTAINER_NAME}"; then
@@ -56,7 +56,7 @@ while true; do
     sleep 10
 done
 
-curl -fsS --max-time 30 "${MODELS_URL}" | tee "${RUN_DIR}/models.response.json"
+curl --noproxy '*' -fsS --max-time 30 "${MODELS_URL}" | tee "${RUN_DIR}/models.response.json"
 docker inspect "${CONTAINER_NAME}" >"${RUN_DIR}/container.ready.inspect.json"
 docker exec "${CONTAINER_NAME}" python -c \
     'from importlib.metadata import PackageNotFoundError, version
@@ -79,4 +79,4 @@ fi
 touch "${RUN_DIR}/SERVICE_READY"
 trap - EXIT INT TERM
 printf '\nSERVICE_READY base_url=http://%s:%s/v1 run_dir=%s\n' \
-    "${NODE0_COORDINATOR_IP}" "${API_PORT}" "${RUN_DIR}"
+    "${API_BIND_HOST}" "${API_PORT}" "${RUN_DIR}"
