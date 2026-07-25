@@ -653,6 +653,8 @@ CAPTURE_IMAGE_OK image_ref=glm52-expert-capture:v0.22.1rc1-w8a8-v1 patch_id=glm5
 
 基础镜像可能报告 `vllm=0.22.1+empty`。`+empty` 只是 local-version 构建标记；
 当前脚本接受相同 `0.22.1` release 的 `+...` 后缀，同时继续拒绝其他 release。
+若 `vllm-ascend` 是 editable install，脚本会从 Python 实际 import path（通常位于
+`/vllm-workspace/`）定位 W8A8 文件，不依赖错误的 `site-packages` 拼接路径。
 
 仍在 node1 导出，并传到 node0：
 

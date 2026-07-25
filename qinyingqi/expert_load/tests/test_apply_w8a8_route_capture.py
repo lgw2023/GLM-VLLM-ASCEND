@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import importlib.util
+import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
 
 SCRIPT_PATH = Path(__file__).parents[1] / "patches" / "apply_w8a8_route_capture.py"
@@ -24,6 +27,18 @@ def original_source() -> str:
 
 
 class W8A8RouteCapturePatchTests(unittest.TestCase):
+    def test_target_path_supports_editable_install(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            package_root = Path(directory) / "vllm_ascend"
+            target = package_root / PATCHER.PACKAGE_RELATIVE_PATH
+            target.parent.mkdir(parents=True)
+            target.write_text("# installed source\n", encoding="utf-8")
+            spec = SimpleNamespace(
+                submodule_search_locations=[str(package_root)]
+            )
+            with mock.patch.object(PATCHER, "find_spec", return_value=spec):
+                self.assertEqual(PATCHER.target_path(), target)
+
     def test_release_gate_accepts_only_local_build_suffixes(self) -> None:
         self.assertTrue(PATCHER.matches_release("0.22.1", "0.22.1"))
         self.assertTrue(PATCHER.matches_release("0.22.1+empty", "0.22.1"))

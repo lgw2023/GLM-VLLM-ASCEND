@@ -110,8 +110,17 @@ package_version_matches_release \
     die "derived image has unexpected vLLM-Ascend version"
 
 MARKER_COUNT="$(docker run --rm --entrypoint python "${OUTPUT_IMAGE}" -c \
-    'from importlib.metadata import distribution
-path = distribution("vllm-ascend").locate_file("vllm_ascend/quantization/methods/w8a8_dynamic.py")
+    'from importlib.util import find_spec
+from pathlib import Path
+spec = find_spec("vllm_ascend")
+if spec is None or spec.submodule_search_locations is None:
+    raise RuntimeError("cannot resolve installed vllm_ascend package")
+paths = [Path(root) / "quantization/methods/w8a8_dynamic.py"
+         for root in spec.submodule_search_locations]
+existing = [path for path in paths if path.is_file()]
+if len(existing) != 1:
+    raise RuntimeError(f"expected one installed W8A8 source file, got {existing}")
+path = existing[0]
 print(path.read_text(encoding="utf-8").count("# GLM52_W8A8_ROUTE_CAPTURE_V1"))')"
 [[ "${MARKER_COUNT}" == 1 ]] || \
     die "derived image does not contain exactly one W8A8 route-capture hook"

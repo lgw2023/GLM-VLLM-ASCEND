@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+from importlib.util import find_spec
 from importlib.metadata import distribution, version
 from pathlib import Path
 
@@ -12,6 +13,7 @@ from pathlib import Path
 EXPECTED_VLLM_VERSION = "0.22.1"
 EXPECTED_VLLM_ASCEND_VERSION = "0.22.1rc1"
 TARGET_RELATIVE_PATH = "vllm_ascend/quantization/methods/w8a8_dynamic.py"
+PACKAGE_RELATIVE_PATH = "quantization/methods/w8a8_dynamic.py"
 EXPECTED_SOURCE_SHA256 = "1dd59f6f8114e19824d559b99cc4a22fed04e54ff0ecd9e853aa3b6a574699e2"
 PATCH_MARKER = "# GLM52_W8A8_ROUTE_CAPTURE_V1"
 ANCHOR = (
@@ -29,10 +31,31 @@ CAPTURE_BLOCK = (
 )
 
 def target_path() -> Path:
+    # Official images may install vllm-ascend as an editable source tree. In
+    # that case distribution().locate_file() points under site-packages even
+    # though Python imports vllm_ascend from /vllm-workspace/vllm-ascend.
+    spec = find_spec("vllm_ascend")
+    if spec is not None and spec.submodule_search_locations is not None:
+        import_candidates = [
+            Path(location) / PACKAGE_RELATIVE_PATH
+            for location in spec.submodule_search_locations
+        ]
+        existing = [path for path in import_candidates if path.is_file()]
+        if len(existing) == 1:
+            return existing[0]
+        if len(existing) > 1:
+            raise RuntimeError(
+                "multiple installed W8A8 source files found: "
+                + ", ".join(str(path) for path in existing)
+            )
+
     package = distribution("vllm-ascend")
     path = Path(package.locate_file(TARGET_RELATIVE_PATH))
     if not path.is_file():
-        raise RuntimeError(f"installed W8A8 source file not found: {path}")
+        raise RuntimeError(
+            "installed W8A8 source file not found via Python import path or "
+            f"distribution metadata; metadata candidate: {path}"
+        )
     return path
 
 

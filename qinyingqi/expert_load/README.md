@@ -252,6 +252,9 @@ CAPTURE_IMAGE_OK image_ref=glm52-expert-capture:v0.22.1rc1-w8a8-v1 patch_id=glm5
 官方镜像中的 `vllm` 版本可能显示为 `0.22.1+empty`。`+empty` 是 PEP 440
 local-version 构建标记，release 仍是 `0.22.1`；构建、启动和 readiness 门禁均接受
 `0.22.1` 或 `0.22.1+...`，但仍拒绝 `0.22.2`、`0.22.1rc1` 等其他 release。
+该镜像还可能把 `vllm-ascend` 作为 editable source tree 安装在
+`/vllm-workspace/`，而不是复制到 `site-packages`。补丁和构建后检查通过 Python
+实际 import path 定位源码，不能用 distribution metadata 拼接安装路径。
 
 随后仍在 node1 导出派生镜像：
 
