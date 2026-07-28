@@ -6,8 +6,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib.sh"
 
 BASE_IMAGE_DEFAULT="quay.io/ascend/vllm-ascend:v0.22.1rc1"
-OUTPUT_IMAGE_DEFAULT="deepseek-v4-expert-capture:v0.22.1rc1-w8a8-v3"
-PATCH_ID_DEFAULT="deepseek-v4-w8a8-logical-topk-v3"
+OUTPUT_IMAGE_DEFAULT="deepseek-v4-expert-capture:v0.22.1rc1-w8a8-v4"
+PATCH_ID_DEFAULT="deepseek-v4-w8a8-logical-topk-v4"
 EXPECTED_VLLM_VERSION="0.22.1"
 EXPECTED_VLLM_ASCEND_VERSION="0.22.1rc1"
 
@@ -110,33 +110,34 @@ ACTUAL_VLLM_ASCEND_VERSION="$(printf '%s\n' "${PACKAGE_LINES}" | sed -n 's/^vllm
 MARKER_COUNT="$(docker run --rm --entrypoint python "${OUTPUT_IMAGE}" -c \
     'from importlib.util import find_spec
 from pathlib import Path
-spec = find_spec("vllm_ascend")
-if spec is None or spec.submodule_search_locations is None:
-    raise RuntimeError("cannot resolve installed vllm_ascend package")
-paths = [Path(root) / "quantization/methods/w8a8_dynamic.py"
-         for root in spec.submodule_search_locations]
-existing = [path for path in paths if path.is_file()]
-if len(existing) != 1:
-    raise RuntimeError(f"expected one installed W8A8 source file, got {existing}")
-source = existing[0].read_text(encoding="utf-8")
-marker = "# DEEPSEEK_V4_W8A8_ROUTE_CAPTURE_V3"
+
+def one_source(import_name, relative):
+    spec = find_spec(import_name)
+    if spec is None or spec.submodule_search_locations is None:
+        raise RuntimeError(f"cannot resolve installed {import_name} package")
+    paths = [Path(root) / relative for root in spec.submodule_search_locations]
+    existing = [path for path in paths if path.is_file()]
+    if len(existing) != 1:
+        raise RuntimeError(f"expected one {relative}, got {existing}")
+    return existing[0]
+
+w8a8 = one_source("vllm_ascend", "quantization/methods/w8a8_dynamic.py")
+source = w8a8.read_text(encoding="utf-8")
+marker = "# DEEPSEEK_V4_W8A8_ROUTE_CAPTURE_V4"
 if source.count(marker) != 1:
     raise RuntimeError("DeepSeek W8A8 capture marker is absent or duplicated")
 if source.index(marker) > source.index("        if zero_expert_num > 0"):
     raise RuntimeError("capture marker is after logical-ID remapping")
 if "capturer.capture(layer_id=layer.layer_id, topk_ids=topk_ids)" not in source:
     raise RuntimeError("Ascend routed-experts capturer call is absent")
-capture_paths = [Path(root) / "patch/worker/patch_routed_experts_capture.py"
-                 for root in spec.submodule_search_locations]
-capture_existing = [path for path in capture_paths if path.is_file()]
-if len(capture_existing) != 1:
-    raise RuntimeError(f"expected one routed-experts capture source file, got {capture_existing}")
-capture_source = capture_existing[0].read_text(encoding="utf-8")
-capture_marker = "# DEEPSEEK_V4_TP8_CAPTURE_GATHER_V3"
+
+capture = one_source("vllm", "model_executor/layers/fused_moe/routed_experts_capturer.py")
+capture_source = capture.read_text(encoding="utf-8")
+capture_marker = "# DEEPSEEK_V4_VLLM_TP8_CAPTURE_GATHER_V4"
 if capture_source.count(capture_marker) != 1:
-    raise RuntimeError("DeepSeek TP8 capture-gather marker is absent or duplicated")
-if "dist.all_gather(list(gathered_splits), topk_ids, get_tp_group().device_group)" not in capture_source:
-    raise RuntimeError("TP8 routed-experts all-gather call is absent")
+    raise RuntimeError("DeepSeek vLLM TP8 capture-gather marker is absent or duplicated")
+if "get_tp_group().all_gather(topk_ids, dim=0)" not in capture_source:
+    raise RuntimeError("active vLLM TP8 routed-experts all-gather call is absent")
 print("CAPTURE_PATCH_SOURCES_OK")')"
 [[ "${MARKER_COUNT}" == CAPTURE_PATCH_SOURCES_OK ]] || \
     die "derived image does not contain the required DeepSeek capture hooks"

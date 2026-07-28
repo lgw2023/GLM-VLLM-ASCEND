@@ -127,22 +127,24 @@ targets = [path for path in targets if path.is_file()]
 if len(targets) != 1:
     raise SystemExit(f"expected one installed w8a8_dynamic.py, got {targets}")
 marker_count = targets[0].read_text(encoding="utf-8").count(
-    "# DEEPSEEK_V4_W8A8_ROUTE_CAPTURE_V3"
+    "# DEEPSEEK_V4_W8A8_ROUTE_CAPTURE_V4"
 )
 print(f"route_capture_marker_count={marker_count}")
 if marker_count != 1:
     raise SystemExit("W8A8 route-capture hook is absent or duplicated")
-capture_targets = [Path(root) / "patch/worker/patch_routed_experts_capture.py" for root in roots]
+vllm_spec = find_spec("vllm")
+vllm_roots = [] if vllm_spec is None or vllm_spec.submodule_search_locations is None else list(vllm_spec.submodule_search_locations)
+capture_targets = [Path(root) / "model_executor/layers/fused_moe/routed_experts_capturer.py" for root in vllm_roots]
 capture_targets = [path for path in capture_targets if path.is_file()]
 if len(capture_targets) != 1:
-    raise SystemExit(f"expected one routed-experts capture source file, got {capture_targets}")
+    raise SystemExit(f"expected one active vLLM routed-experts capture source file, got {capture_targets}")
 capture_source = capture_targets[0].read_text(encoding="utf-8")
-capture_marker_count = capture_source.count("# DEEPSEEK_V4_TP8_CAPTURE_GATHER_V3")
+capture_marker_count = capture_source.count("# DEEPSEEK_V4_VLLM_TP8_CAPTURE_GATHER_V4")
 print(f"tp8_capture_gather_marker_count={capture_marker_count}")
 if capture_marker_count != 1:
     raise SystemExit("TP8 capture-gather hook is absent or duplicated")
-if "dist.all_gather(list(gathered_splits), topk_ids, get_tp_group().device_group)" not in capture_source:
-    raise SystemExit("TP8 capture-gather hook does not call the TP all-gather")
+if "get_tp_group().all_gather(topk_ids, dim=0)" not in capture_source:
+    raise SystemExit("active vLLM TP8 capture-gather hook does not call the TP all-gather")
 ' "${EXPECTED_VLLM_PACKAGE_VERSION}" "${EXPECTED_VLLM_ASCEND_PACKAGE_VERSION}" \
     | tee "${RUN_DIR}/image-audit.txt"
 
