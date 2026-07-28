@@ -17,20 +17,32 @@ Node0 公共盘，benchmark 直接复用远端已经准备好的 JSONL。
 /data/node0_disk1/Public/DeepSeek-V4-Flash
 ```
 
-现有服务器清单记录该目录约 148.66 GiB。项目锁定的 vLLM-Ascend
-`v0.22.1rc1` 有 `DeepSeek-V4-Flash-w4a8-mtp` 的 A2 四卡 TP4 + EP 回归测试：
+现有服务器清单记录该目录全部 safetensors 约 148.66 GiB。实测目录有 92 个
+shard，但 `model.safetensors.index.json` 只引用其中 46 个；实际加载候选大小应看
+audit 的 `active_shard_gib`，不能用全部文件之和估算 HBM。未引用文件暂不删除。
+
+项目锁定的 vLLM-Ascend `v0.22.1rc1` 有
+`DeepSeek-V4-Flash-w4a8-mtp` 的 A2 四卡 TP4 + EP 回归测试：
 
 ```text
 upstream/vllm-ascend/tests/e2e/pull_request/four_card/test_deepseek_v4.py
 ```
 
-因此它是当前最值得先尝试的四卡 DeepSeek 路线。但目录名称不能证明权重格式，
-必须先让 `00_audit_model.sh` 从 `config.json` 和
-`quant_model_description.json` 证明：
+当前公共目录不是上述 ModelSlim checkpoint 的同名副本，而是 DeepSeek-V4 原生
+mixed checkpoint。它通过 `config.json` 表达：普通 Linear/Attention 使用 FP8，
+MoE Expert 使用 FP4/MXFP4；vLLM-Ascend 会把该 FusedMoE 路径映射到
+`w4a8_moe`。因此 audit 同时识别两种合法部署 profile：
+
+- `modelslim_w4a8`：`quant_model_description.json` 明确包含 W4A8；
+- `deepseek_v4_native_fp8_fp4`：`quant_method=fp8` 或
+  `deepseek_v4_fp8`，且 `expert_dtype=fp4`；该字段缺失时按锁定的 vLLM
+  `0.22.1` 行为默认成 `fp4`。
+
+目录名称仍不能证明权重格式，必须先让 `00_audit_model.sh` 证明：
 
 - `model_type=deepseek_v4`；
 - 存在 MoE 层、routed Expert 数和 Top-K；
-- 量化描述中确实存在 `W4A8`；
+- 上述两个 W4A8 Expert 部署 profile 至少匹配一个；
 - safetensors 分片和索引没有缺文件。
 
 任一条件不成立，脚本退出且不会启动容器。
@@ -130,7 +142,13 @@ bash scripts/00_audit_model.sh \
 "compatible": true
 "model_type": "deepseek_v4"
 "w4a8_detected": true
+"deployment_profile": "deepseek_v4_native_fp8_fp4"
+"expert_dtype": "fp4"
+"recommended_vllm_quantization": "fp8"
 ```
+
+`quant_method=deepseek_v4_fp8` 时最后一项会对应输出
+`deepseek_v4_fp8`，同样合法。启动脚本会读取该值，不要求手工填写。
 
 同时记录输出中的：
 
@@ -138,11 +156,15 @@ bash scripts/00_audit_model.sh \
 - `num_experts`；
 - `top_k`；
 - `moe_layer_indices`；
-- `total_shard_gib`。
+- `active_shard_gib`；
+- `unreferenced_shard_count` 和 `warnings`。
 
-如果报 `W4A8 was not proven`，不要改脚本绕过检查。当前公共目录可能不是四卡
-回归测试所用的 checkpoint；把完整 audit JSON 发回来，再确认是否已有
-`DeepSeek-V4-Flash-w4a8-mtp` 或是否需要在远端下载。不要在 Mac 下载。
+`unreferenced_shard_count` 非零只产生 warning，不会把 compatible 改成 false。
+vLLM 会按照 index 过滤未引用 shard；在来源查清前不要移动或删除公共目录文件。
+
+如果新版脚本仍报 `W4A8 Expert execution was not proven`，表示它既不是
+ModelSlim W4A8，也不是 DeepSeek-V4 原生 FP8+FP4 mixed profile。不要绕过检查，
+也不要在 Mac 下载模型。
 
 ## 5. 确认四张卡并启动
 
@@ -182,7 +204,9 @@ ${RUN_ROOT}/${RUN_ID}/run.env
 服务配置来自 vLLM-Ascend 四卡测试，但为路由实验做了收敛：
 
 - TP=4、EP 开启；
-- W4A8 Ascend quantization；
+- 从 `model-audit.json` 自动选择量化参数：当前 mixed checkpoint 使用
+  `--quantization fp8`（或配置中原样的 `deepseek_v4_fp8`），ModelSlim checkpoint
+  才使用 `--quantization ascend`；
 - `max_model_len=8192`；
 - `max_num_seqs=1`；
 - `--enable-return-routed-experts`；
@@ -332,10 +356,33 @@ bash scripts/07_stop.sh configs/node0.env --remove
 
 ## 10. 常见错误
 
-### `W4A8 was not proven`
+### `W4A8 Expert execution was not proven`
 
-公共目录不是四卡 W4A8 checkpoint，或缺少量化描述。不要换成 279 GiB 的 W8A8
-目录。保存 audit JSON 后确认准确权重来源。
+先确认远端已更新新版 `00_audit_model.py`。新版会识别 DeepSeek-V4 原生
+FP8+FP4 mixed profile，不要求配置里出现字面量 `W4A8`。如果仍失败，保存 audit
+JSON 后确认权重来源；不要换成 279 GiB 的 W8A8 目录。
+
+### audit 显示未引用 shard
+
+这表示目录里存在 `model.safetensors.index.json` 没有引用的额外权重文件。实验记录
+使用 `active_shard_gib`；vLLM 加载器会按 index 过滤它们。它不是缺分片错误，暂时
+不要清理公共目录。
+
+### 启动日志提示 quantization 不匹配
+
+不要手工把当前 mixed checkpoint 改成 `--quantization ascend`。检查：
+
+```bash
+source configs/node0.env
+RUN_ID=$(tr -d '[:space:]' < "${RUN_ROOT}/current-run-id")
+grep -E 'deployment_profile|recommended_vllm_quantization' \
+  "${RUN_ROOT}/${RUN_ID}/model-audit.json"
+grep -E 'quantization_profile|vllm_quantization' \
+  "${RUN_ROOT}/${RUN_ID}/run.env"
+```
+
+二者必须一致；当前模型预期是 native mixed profile 和 `fp8`（或配置原值
+`deepseek_v4_fp8`）。
 
 ### 镜像没有 `vllm_ascend.models.deepseek_v4`
 

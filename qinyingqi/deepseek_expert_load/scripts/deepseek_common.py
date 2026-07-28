@@ -10,9 +10,10 @@ import io
 import json
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Iterable
+from typing import TYPE_CHECKING, Any, Iterable
 
-import numpy as np
+if TYPE_CHECKING:
+    import numpy as np
 
 
 @dataclass(frozen=True)
@@ -117,7 +118,9 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def decode_routed_experts(encoded: str) -> np.ndarray:
+def decode_routed_experts(encoded: str) -> "np.ndarray":
+    import numpy as np
+
     if not isinstance(encoded, str) or not encoded:
         raise ValueError("routed_experts is missing or empty")
     try:
@@ -134,11 +137,13 @@ def decode_routed_experts(encoded: str) -> np.ndarray:
 
 
 def validate_routes(
-    routes: np.ndarray,
+    routes: "np.ndarray",
     topology: ModelTopology,
     prompt_tokens: int,
     completion_tokens: int,
 ) -> dict[str, Any]:
+    import numpy as np
+
     if prompt_tokens < 1 or completion_tokens < 1:
         raise ValueError("prompt and completion token counts must be positive")
     expected_rows = prompt_tokens + completion_tokens - 1
@@ -183,11 +188,13 @@ def validate_routes(
 
 
 def count_assignments(
-    routes: np.ndarray,
+    routes: "np.ndarray",
     topology: ModelTopology,
     prompt_tokens: int,
-) -> np.ndarray:
+) -> "np.ndarray":
     """Return counts with shape [phase(total,prefill,decode), moe_layer, expert]."""
+    import numpy as np
+
     moe_routes = routes[:, topology.moe_layer_indices, :]
     phase_routes = (moe_routes, moe_routes[:prompt_tokens], moe_routes[prompt_tokens:])
     counts = np.zeros((3, topology.num_moe_layers, topology.num_experts), dtype=np.int64)

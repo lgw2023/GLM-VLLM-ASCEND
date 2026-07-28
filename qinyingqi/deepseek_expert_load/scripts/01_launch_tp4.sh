@@ -65,11 +65,36 @@ if docker container inspect "${CONTAINER_NAME}" >/dev/null 2>&1; then
     die "container already exists: ${CONTAINER_NAME}"
 fi
 
+MODEL_AUDIT_PATH="${RUN_DIR}/model-audit.json"
 python3 "${SCRIPT_DIR}/00_audit_model.py" \
     --model-path "${MODEL_HOST_PATH}" \
     --require-model-type deepseek_v4 \
     --require-w4a8 \
-    --output "${RUN_DIR}/model-audit.json"
+    --output "${MODEL_AUDIT_PATH}"
+
+read -r QUANTIZATION_PROFILE VLLM_QUANTIZATION < <(
+    python3 - "${MODEL_AUDIT_PATH}" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as source:
+    report = json.load(source)
+quantization = report["quantization"]
+profile = quantization.get("deployment_profile")
+method = quantization.get("recommended_vllm_quantization")
+allowed = {"ascend", "fp8", "deepseek_v4_fp8"}
+if not isinstance(profile, str) or not profile:
+    raise SystemExit("model audit did not produce a deployment profile")
+if method not in allowed:
+    raise SystemExit(
+        f"model audit produced unsupported vLLM quantization {method!r}; "
+        f"expected one of {sorted(allowed)}"
+    )
+print(profile, method)
+PY
+)
+printf 'quantization_profile=%s vllm_quantization=%s\n' \
+    "${QUANTIZATION_PROFILE}" "${VLLM_QUANTIZATION}"
 
 docker run --rm --entrypoint python "${IMAGE_REF}" -c '
 from importlib.metadata import version
@@ -196,7 +221,7 @@ SERVICE_ARGS=(
     --gpu-memory-utilization "${GPU_MEMORY_UTILIZATION}"
     --tensor-parallel-size 4
     --enable-expert-parallel
-    --quantization ascend
+    --quantization "${VLLM_QUANTIZATION}"
     --tokenizer-mode deepseek_v4
     --block-size 128
     --generation-config vllm
@@ -217,6 +242,8 @@ write_shell_command "${RUN_DIR}/launch.command.sh" \
     printf 'image_ref=%s\n' "${IMAGE_REF}"
     printf 'model_host_path=%s\n' "${MODEL_HOST_PATH}"
     printf 'served_model_name=%s\n' "${SERVED_MODEL_NAME}"
+    printf 'quantization_profile=%s\n' "${QUANTIZATION_PROFILE}"
+    printf 'vllm_quantization=%s\n' "${VLLM_QUANTIZATION}"
     printf 'host_npu_ids=%s\n' "${VALIDATED_IDS}"
     printf 'container_npu_ids=0,1,2,3\n'
     printf 'api_url=http://%s:%s/v1\n' "${API_HOST}" "${API_PORT}"

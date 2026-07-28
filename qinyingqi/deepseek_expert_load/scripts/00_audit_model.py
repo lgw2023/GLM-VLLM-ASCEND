@@ -30,10 +30,17 @@ def walk_scalars(value: Any) -> Iterator[str]:
         yield str(value)
 
 
-def quantization_summary(model_path: Path, config: dict[str, Any]) -> dict[str, Any]:
+def quantization_summary(
+    model_path: Path,
+    config: dict[str, Any],
+    model_type: str,
+) -> dict[str, Any]:
     description_path = model_path / "quant_model_description.json"
     sources: list[tuple[str, Any]] = []
     config_quant = config.get("quantization_config")
+    text_config = config.get("text_config")
+    if config_quant is None and isinstance(text_config, dict):
+        config_quant = text_config.get("quantization_config")
     if config_quant is not None:
         sources.append(("config.json:quantization_config", config_quant))
     if description_path.is_file():
@@ -44,18 +51,87 @@ def quantization_summary(model_path: Path, config: dict[str, Any]) -> dict[str, 
         for scalar in walk_scalars(source):
             for marker in QUANT_MARKER.findall(scalar):
                 marker_counts[marker.upper()] += 1
+
+    quant_method: str | None = None
+    if isinstance(config_quant, dict):
+        value = config_quant.get("quant_method")
+        if isinstance(value, str) and value.strip():
+            quant_method = value.strip().lower()
+
+    expert_dtype: str | None = None
+    expert_dtype_source: str | None = None
+    for source_name, source in (
+        ("config.json", config),
+        ("config.json:text_config", text_config),
+    ):
+        if not isinstance(source, dict):
+            continue
+        value = source.get("expert_dtype")
+        if isinstance(value, str) and value.strip():
+            expert_dtype = value.strip().lower()
+            expert_dtype_source = source_name
+            break
+
+    native_fp8 = model_type == "deepseek_v4" and quant_method in {
+        "fp8",
+        "deepseek_v4_fp8",
+    }
+    if native_fp8 and expert_dtype is None:
+        # vLLM 0.22.1's DeepseekV4FP8Config defaults a missing expert_dtype
+        # to fp4. Keep that default explicit in the audit contract.
+        expert_dtype = "fp4"
+        expert_dtype_source = "vllm-0.22.1-default"
+
+    explicit_w4a8 = marker_counts["W4A8"] > 0
+    native_fp8_fp4 = native_fp8 and expert_dtype == "fp4"
+    if description_path.is_file() and explicit_w4a8:
+        deployment_profile = "modelslim_w4a8"
+        recommended_quantization = "ascend"
+    elif native_fp8_fp4:
+        deployment_profile = "deepseek_v4_native_fp8_fp4"
+        # Match config.json exactly. vLLM-Ascend registers both names to its
+        # FP8 config, which selects the W4A8 MoE scheme for FusedMoE layers.
+        recommended_quantization = quant_method
+    else:
+        deployment_profile = "unsupported_or_unproven"
+        recommended_quantization = None
+
+    evidence: list[str] = []
+    if explicit_w4a8:
+        evidence.append("explicit_w4a8_marker")
+    if native_fp8_fp4:
+        evidence.append("deepseek_v4_fp8_linear_plus_fp4_experts")
     return {
         "sources": [name for name, _ in sources],
         "markers": dict(sorted(marker_counts.items())),
-        "w4a8_detected": marker_counts["W4A8"] > 0,
+        "quant_method": quant_method,
+        "expert_dtype": expert_dtype,
+        "expert_dtype_source": expert_dtype_source,
+        "explicit_w4a8_marker_detected": explicit_w4a8,
+        "native_fp8_fp4_detected": native_fp8_fp4,
+        "w4a8_detected": explicit_w4a8 or native_fp8_fp4,
+        "w4a8_evidence": evidence,
+        "deployment_profile": deployment_profile,
+        "recommended_vllm_quantization": recommended_quantization,
         "quant_model_description_present": description_path.is_file(),
     }
 
 
-def weight_summary(model_path: Path) -> tuple[dict[str, Any], list[str]]:
+def weight_summary(
+    model_path: Path,
+) -> tuple[dict[str, Any], list[str], list[str]]:
     problems: list[str] = []
-    shards = sorted(model_path.glob("*.safetensors"))
-    zero_size = [path.name for path in shards if path.stat().st_size == 0]
+    warnings: list[str] = []
+    shards = sorted(model_path.rglob("*.safetensors"))
+    shard_by_name = {
+        path.relative_to(model_path).as_posix(): path
+        for path in shards
+    }
+    zero_size = [
+        path.relative_to(model_path).as_posix()
+        for path in shards
+        if path.stat().st_size == 0
+    ]
     if not shards:
         problems.append("no .safetensors files found")
     if zero_size:
@@ -74,24 +150,61 @@ def weight_summary(model_path: Path) -> tuple[dict[str, Any], list[str]]:
             referenced_files = {
                 value for value in weight_map.values() if isinstance(value, str)
             }
-            missing = sorted(name for name in referenced_files if not (model_path / name).is_file())
+            invalid_values = sum(
+                1 for value in weight_map.values() if not isinstance(value, str)
+            )
+            if invalid_values:
+                problems.append(
+                    f"index weight_map has {invalid_values} non-string shard values"
+                )
+            missing = sorted(referenced_files - set(shard_by_name))
             if missing:
                 problems.append(f"index references missing shards: {missing}")
     elif len(shards) > 1:
         problems.append("multiple safetensors shards found without model.safetensors.index.json")
 
+    if referenced_files:
+        active_files = referenced_files & set(shard_by_name)
+        unreferenced_files = set(shard_by_name) - referenced_files
+    else:
+        active_files = set(shard_by_name)
+        unreferenced_files = set()
+    if unreferenced_files:
+        warnings.append(
+            f"{len(unreferenced_files)} safetensors shards are not referenced by "
+            "model.safetensors.index.json; vLLM filters them out, but do not delete "
+            "them until their provenance is known"
+        )
+
+    total_shard_bytes = sum(path.stat().st_size for path in shards)
+    active_shard_bytes = sum(
+        shard_by_name[name].stat().st_size for name in active_files
+    )
+    unreferenced_shard_bytes = sum(
+        shard_by_name[name].stat().st_size for name in unreferenced_files
+    )
+
     return (
         {
             "shard_count": len(shards),
-            "total_shard_bytes": sum(path.stat().st_size for path in shards),
-            "total_shard_gib": round(
-                sum(path.stat().st_size for path in shards) / 1024**3, 3
-            ),
+            "total_shard_bytes": total_shard_bytes,
+            "total_shard_gib": round(total_shard_bytes / 1024**3, 3),
             "index_present": index_path.is_file(),
             "indexed_tensor_count": tensor_count,
             "referenced_shard_count": len(referenced_files),
+            "active_shard_count": len(active_files),
+            "active_shard_bytes": active_shard_bytes,
+            "active_shard_gib": round(active_shard_bytes / 1024**3, 3),
+            "unreferenced_shard_count": len(unreferenced_files),
+            "unreferenced_shard_bytes": unreferenced_shard_bytes,
+            "unreferenced_shard_gib": round(
+                unreferenced_shard_bytes / 1024**3,
+                3,
+            ),
+            "unreferenced_shards_first20": sorted(unreferenced_files)[:20],
         },
         problems,
+        warnings,
     )
 
 
@@ -117,9 +230,9 @@ def main() -> int:
 
     config = load_json(config_path)
     topology = topology_from_config(config)
-    weights, weight_problems = weight_summary(model_path)
+    weights, weight_problems, warnings = weight_summary(model_path)
     problems.extend(weight_problems)
-    quantization = quantization_summary(model_path, config)
+    quantization = quantization_summary(model_path, config, topology.model_type)
 
     if args.require_model_type and topology.model_type != args.require_model_type:
         problems.append(
@@ -127,15 +240,17 @@ def main() -> int:
         )
     if args.require_w4a8 and not quantization["w4a8_detected"]:
         problems.append(
-            "W4A8 was not proven by config.json or quant_model_description.json"
+            "W4A8 Expert execution was not proven by an explicit ModelSlim "
+            "marker or a DeepSeek-V4 FP8+FP4 configuration"
         )
 
     report = {
-        "schema_version": 1,
+        "schema_version": 2,
         "model_path": str(model_path),
         "topology": topology.to_dict(),
         "quantization": quantization,
         "weights": weights,
+        "warnings": warnings,
         "problems": problems,
         "compatible": not problems,
     }
