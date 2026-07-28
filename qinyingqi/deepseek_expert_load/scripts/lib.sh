@@ -35,16 +35,28 @@ load_config() {
 }
 
 validate_npu_ids() {
-    python3 - "${HOST_NPU_IDS}" <<'PY'
+    validate_npu_ids_for_count 4
+}
+
+validate_npu_ids_for_count() {
+    local expected_count="$1"
+    python3 - "${HOST_NPU_IDS}" "${expected_count}" <<'PY'
 import sys
 
 raw = sys.argv[1]
+expected_count = int(sys.argv[2])
 try:
     ids = [int(value) for value in raw.split(",")]
 except ValueError as exc:
     raise SystemExit(f"HOST_NPU_IDS must be comma-separated integers: {exc}")
-if len(ids) != 4 or len(set(ids)) != 4 or any(value < 0 or value > 7 for value in ids):
-    raise SystemExit("HOST_NPU_IDS must contain four unique IDs from 0..7")
+if (
+    len(ids) != expected_count
+    or len(set(ids)) != expected_count
+    or any(value < 0 or value > 7 for value in ids)
+):
+    raise SystemExit(
+        f"HOST_NPU_IDS must contain {expected_count} unique IDs from 0..7"
+    )
 print(",".join(str(value) for value in ids))
 PY
 }

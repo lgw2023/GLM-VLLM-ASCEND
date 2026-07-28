@@ -1,139 +1,152 @@
-# DeepSeek 四卡 Expert Load 预实验
+# DeepSeek-V4 Expert Load on Ascend A2
 
-这个目录是在 Node0 的 4 张 Ascend 910B1 上运行 DeepSeek MoE、采集 logical
-Expert 路由并比较不同 benchmark 负载分布的独立实验。它不会修改或调用
-`qinyingqi/expert_load` 中的 GLM5.2 启动、采集和分析脚本。
+本目录用于采集 DeepSeek-V4 的 logical Expert 路由，对比不同 benchmark 的负载
+分布，并验证 20% Expert 是否承担 90% token assignment。它与
+`qinyingqi/expert_load` 下的 GLM5.2 双节点实验完全隔离。
 
-本地 Mac 不需要也不应该下载模型或 benchmark。本目录中的下载量为零：模型读取
-Node0 公共盘，benchmark 直接复用远端已经准备好的 JSONL。
+Mac 不下载模型和 benchmark。模型、镜像、NPU 计算和结果都留在远端服务器。
 
-## 1. 模型选择结论
+## 1. 当前可执行结论
 
-### 1.1 本实验默认目标
+### 1.1 主实验：Node1 八卡 W8A8
 
-默认检查：
+在项目逻辑 Node1（`7.150.15.14`）使用：
+
+```text
+模型：/data/node0_disk1/Public/DeepSeek-V4-Flash-w8a8-mtp
+硬件：8 x Ascend 910B1 64 GiB
+并行：DP=1, TP=8, EP=on
+量化：ModelSlim W8A8, --quantization ascend
+镜像：glm52-expert-capture:v0.22.1rc1-w8a8-v1
+API：http://127.0.0.1:7100/v1
+结果：/data/disk2/deepseek-expert-load-w8a8/runs
+```
+
+该模型约 279.41 GiB。vLLM-Ascend 官方 DeepSeek-V4-Flash 教程明确支持单台
+Atlas 800 A2、8 x 64 GiB 部署 W8A8：
+
+<https://docs.vllm.ai/projects/ascend/en/main/tutorials/models/DeepSeek-V4-Flash.html>
+
+本实验使用官方资源拓扑，但为 Expert 路由基线关闭 MTP、async scheduling、
+prefix caching、EPLB 和动态负载均衡；否则可能把额外运行机制混入任务分布差异。
+派生镜像的 tag 虽然沿用 `glm52`，其中 patch 实际修改的是 vLLM-Ascend 通用的
+`W8A8_DYNAMIC` MoE 执行方法；DeepSeek W8A8 同样必须使用它才能返回真实 logical
+Expert ID。启动脚本会同时核验 Docker label 和源码 marker，裸基础镜像无法通过。
+
+### 1.2 不再在 A2 上启动原生 FP8+MXFP4 目录
 
 ```text
 /data/node0_disk1/Public/DeepSeek-V4-Flash
 ```
 
-现有服务器清单记录该目录全部 safetensors 约 148.66 GiB。实测目录有 92 个
-shard，但 `model.safetensors.index.json` 只引用其中 46 个；实际加载候选大小应看
-audit 的 `active_shard_gib`，不能用全部文件之和估算 HBM。未引用文件暂不删除。
-
-项目锁定的 vLLM-Ascend `v0.22.1rc1` 有
-`DeepSeek-V4-Flash-w4a8-mtp` 的 A2 四卡 TP4 + EP 回归测试：
+该目录是原生 mixed checkpoint：Linear/Attention 为 FP8，Expert 为 MXFP4。
+在 Ascend 910B1 加载时会调用 `float4_e2m1fn_x2` custom dtype，并报：
 
 ```text
-upstream/vllm-ascend/tests/e2e/pull_request/four_card/test_deepseek_v4.py
+RuntimeError: customize_dtype is not supported by the current soc version
 ```
 
-当前公共目录不是上述 ModelSlim checkpoint 的同名副本，而是 DeepSeek-V4 原生
-mixed checkpoint。它通过 `config.json` 表达：普通 Linear/Attention 使用 FP8，
-MoE Expert 使用 FP4/MXFP4；vLLM-Ascend 会把该 FusedMoE 路径映射到
-`w4a8_moe`。因此 audit 同时识别两种合法部署 profile：
+这是硬件量化格式不兼容，不是 HCCL、卡号、显存或权重缺失。新版 audit 会在
+`TARGET_SOC=ASCEND910B1` 时拒绝这个 profile，避免再次占卡后才失败。原 TP4
+脚本保留作诊断和其他兼容硬件使用，不作为当前 A2 执行路线。
 
-- `modelslim_w4a8`：`quant_model_description.json` 明确包含 W4A8；
-- `deepseek_v4_native_fp8_fp4`：`quant_method=fp8` 或
-  `deepseek_v4_fp8`，且 `expert_dtype=fp4`；该字段缺失时按锁定的 vLLM
-  `0.22.1` 行为默认成 `fp4`。
+## 2. Node0 失败运行清理
 
-目录名称仍不能证明权重格式，必须先让 `00_audit_model.sh` 证明：
-
-- `model_type=deepseek_v4`；
-- 存在 MoE 层、routed Expert 数和 Top-K；
-- 上述两个 W4A8 Expert 部署 profile 至少匹配一个；
-- safetensors 分片和索引没有缺文件。
-
-任一条件不成立，脚本退出且不会启动容器。
-
-### 1.2 不要用四卡加载 W8A8 目录
-
-```text
-/data/node0_disk1/Public/DeepSeek-V4-Flash-w8a8-mtp
-```
-
-该目录约 279.41 GiB，已经超过 4 × 64 GiB 的算术 HBM 总量，而且推理还需要
-KV cache、workspace 和运行时内存。vLLM-Ascend 教程也要求 8 张 A2，所以不能用
-四卡启动。
-
-### 1.3 “最新开源”措辞边界
-
-可从 DeepSeek 官方公开页面严格核验的旗舰是 DeepSeek-V3.2，但它是约 685B 的
-MoE；官方/上游 W8A8 部署仍需要 2 台 8×64G A2，四卡不可能完整承载。
-
-本项目上游 `v0.22.1rc1` 已经支持 DeepSeek-V4-Flash，并提供 `gdydems` /
-`Eco-Tech` 发布的 W4A8/W8A8 checkpoint。然而在把结果写进对外材料前，还要从
-服务器模型目录或下载记录补齐原始发布者、revision、license 和哈希。补齐前建议
-使用以下准确描述：
-
-> DeepSeek-V4-Flash W4A8 checkpoint supported by vLLM-Ascend v0.22.1rc1
-
-不要暂时写成“DeepSeek 官方原始权重”。这不影响内部 Expert 路由预实验。
-
-## 2. 与 GLM 实验隔离
-
-本实验使用：
-
-- 独立目录：`qinyingqi/deepseek_expert_load`；
-- 独立容器前缀：`deepseek-v4-expert`；
-- 独立端口：`127.0.0.1:7100`；
-- 独立结果根目录：`/data/node0_disk2/deepseek-expert-load/runs`；
-- 独立 current-run-id；
-- 只挂载你确认获批的 4 张物理 NPU，并映射为容器内逻辑卡 `0,1,2,3`。
-
-脚本不会停止或启动 keep-alive，也不会停止其他容器。你仍需按照服务器规则手动
-停止并恢复本次实际使用的 4 张卡。
-
-## 3. Node0 一次性配置
-
-在 Node0 更新项目后进入目录：
+如果四卡 MXFP4 容器还没删除，在 Node0 执行：
 
 ```bash
 cd /home/qinyingqi/GLM-VLLM-ASCEND/qinyingqi/deepseek_expert_load
-
-cp configs/node0.env.example configs/node0.env
-sed -i 's/\r$//' configs/node0.env scripts/*.sh scripts/*.py
+bash scripts/07_stop.sh configs/node0.env --remove
 ```
 
-确认镜像。优先使用未修改的官方基础镜像：
+然后按照服务器规则，手动恢复且只恢复该次使用的 `4,5,6,7` keep-alive。
+
+## 3. Node1 一次性配置
+
+代码 push 后，在 Node1 更新并进入目录：
 
 ```bash
-docker image inspect quay.io/ascend/vllm-ascend:v0.22.1rc1 \
-  --format '{{.Id}} {{.RepoTags}}'
+cd /home/qinyingqi/GLM-VLLM-ASCEND
+git pull
+cd qinyingqi/deepseek_expert_load
+
+source /home/qinyingqi/miniconda3/etc/profile.d/conda.sh
+conda activate torch2.6-py3.10
+python3 -c 'import numpy; print("NUMPY_OK", numpy.__version__)'
+
+test -f configs/node1_w8a8.env || \
+  cp configs/node1_w8a8.env.example configs/node1_w8a8.env
+sed -i 's/\r$//' configs/node1_w8a8.env scripts/*.sh scripts/*.py
 ```
 
-如果 Node0 只有之前 GLM 实验生成的派生镜像，也可以将配置里的 `IMAGE_REF` 改为：
-
-```text
-glm52-expert-capture:v0.22.1rc1-w8a8-v1
-```
-
-它和基础镜像使用相同的 vLLM/vLLM-Ascend 版本；其中 GLM W8A8 hook 不会介入
-DeepSeek-V4 W4A8 路径。使用它不会修改 GLM 实验文件。
-
-编辑配置：
+本地配置已被 `.gitignore` 排除。检查以下关键值：
 
 ```bash
-vi configs/node0.env
+grep -E '^(IMAGE_REF|CAPTURE_PATCH_ID|MODEL_HOST_PATH|BENCHMARK_DATA_ROOT|RUN_ROOT|HOST_NPU_IDS|TARGET_SOC|REQUIRED_EXPERT_QUANTIZATION)=' \
+  configs/node1_w8a8.env
 ```
 
-必须填写管理员实际分配给你的四张卡，例如：
+应为：
 
 ```text
-HOST_NPU_IDS=0,1,2,3
+IMAGE_REF=glm52-expert-capture:v0.22.1rc1-w8a8-v1
+CAPTURE_PATCH_ID=glm52-w8a8-logical-topk-v1
+MODEL_HOST_PATH=/data/node0_disk1/Public/DeepSeek-V4-Flash-w8a8-mtp
+BENCHMARK_DATA_ROOT=/data/node0_disk2/glm52-study/runs/benchmark-data
+RUN_ROOT=/data/disk2/deepseek-expert-load-w8a8/runs
+HOST_NPU_IDS=0,1,2,3,4,5,6,7
+TARGET_SOC=ASCEND910B1
+REQUIRED_EXPERT_QUANTIZATION=w8a8
 ```
 
-不要照抄示例卡号。其余默认路径应与当前服务器清单一致，但仍应逐项核对。
+`MODEL_HOST_PATH` 和 `BENCHMARK_DATA_ROOT` 在 Node1 是 Node0 磁盘的网络挂载；
+结果写入 Node1 本地 `/data/disk2`。
 
-## 4. 在占卡前审计模型
+## 4. Node1 只读预检
 
-这个步骤只读 JSON、文件名和文件大小，不加载模型 tensor，也不占 NPU：
+先确认路径、磁盘和镜像：
+
+```bash
+source configs/node1_w8a8.env
+RUN_STORAGE_ROOT="$(dirname "$(dirname "${RUN_ROOT}")")"
+
+hostname
+findmnt -T "${MODEL_HOST_PATH}"
+findmnt -T "${BENCHMARK_DATA_ROOT}"
+findmnt -T "${RUN_STORAGE_ROOT}"
+test -r "${MODEL_HOST_PATH}/config.json" && echo MODEL_CONFIG_OK
+test -r "${MODEL_HOST_PATH}/model.safetensors.index.json" && echo MODEL_INDEX_OK
+du -sh "${MODEL_HOST_PATH}"
+df -hT "${MODEL_HOST_PATH}" "${BENCHMARK_DATA_ROOT}" "${RUN_STORAGE_ROOT}"
+
+docker image inspect "${IMAGE_REF}" \
+  --format '{{.Id}} {{.RepoTags}} patch={{index .Config.Labels "glm52.capture_patch_id"}}'
+```
+
+检查八张卡以及运行中容器的设备映射：
+
+```bash
+npu-smi info
+
+docker ps --format '{{.ID}}\t{{.Names}}\t{{.Status}}'
+for id in $(docker ps -q); do
+  docker inspect "${id}" \
+    --format '{{.Name}} {{range .HostConfig.Devices}}{{.PathOnHost}}->{{.PathInContainer}} {{end}}'
+done
+```
+
+必须由管理员确认 `0..7` 全部属于本次任务。空容器仅映射 NPU 设备不代表卡在被
+使用；以管理员分配、`npu-smi info` 中的进程/显存状态和 keep-alive 状态为准。
+不要停止或删除其他人的容器。
+
+## 5. 审计 W8A8 模型
+
+这个步骤只读 JSON、索引、文件名和文件大小，不加载 tensor，也不占 NPU：
 
 ```bash
 bash scripts/00_audit_model.sh \
-  configs/node0.env \
-  /tmp/deepseek-v4-model-audit.json
+  configs/node1_w8a8.env \
+  /tmp/deepseek-v4-w8a8-audit.json
 ```
 
 成功标志：
@@ -141,56 +154,47 @@ bash scripts/00_audit_model.sh \
 ```text
 "compatible": true
 "model_type": "deepseek_v4"
-"w4a8_detected": true
-"deployment_profile": "deepseek_v4_native_fp8_fp4"
-"expert_dtype": "fp4"
-"recommended_vllm_quantization": "fp8"
+"deployment_profile": "modelslim_w8a8"
+"expert_quantization": "w8a8"
+"recommended_vllm_quantization": "ascend"
+"soc_compatible": true
 ```
 
-`quant_method=deepseek_v4_fp8` 时最后一项会对应输出
-`deepseek_v4_fp8`，同样合法。启动脚本会读取该值，不要求手工填写。
+同时确认 `problems=[]`、索引没有 missing shard，并记录 `active_shard_gib`。
 
-同时记录输出中的：
+## 6. 启动 Node1 八卡服务
 
-- `num_hidden_layers`；
-- `num_experts`；
-- `top_k`；
-- `moe_layer_indices`；
-- `active_shard_gib`；
-- `unreferenced_shard_count` 和 `warnings`。
-
-`unreferenced_shard_count` 非零只产生 warning，不会把 compatible 改成 false。
-vLLM 会按照 index 过滤未引用 shard；在来源查清前不要移动或删除公共目录文件。
-
-如果新版脚本仍报 `W4A8 Expert execution was not proven`，表示它既不是
-ModelSlim W4A8，也不是 DeepSeek-V4 原生 FP8+FP4 mixed profile。不要绕过检查，
-也不要在 Mac 下载模型。
-
-## 5. 确认四张卡并启动
-
-先看实时状态和正在暴露 NPU 的容器：
+先按照服务器规则手动停止 `0..7` 的 keep-alive。然后执行：
 
 ```bash
-npu-smi info
-
-docker ps --format '{{.ID}}\t{{.Names}}\t{{.Status}}'
-
-for id in $(docker ps -q); do
-  docker inspect "${id}" \
-    --format '{{.Name}} {{range .HostConfig.Devices}}{{.PathOnHost}}->{{.PathInContainer}} {{end}}'
-done
+bash scripts/08_launch_tp8_w8a8.sh \
+  configs/node1_w8a8.env \
+  --confirm-npu-ids 0,1,2,3,4,5,6,7
 ```
 
-得到管理员确认后，只手动停止这四张卡上的 keep-alive。假设你获批的是
-`0,1,2,3`，启动命令为：
+脚本在创建服务前依次检查：
 
-```bash
-bash scripts/01_launch_tp4.sh \
-  configs/node0.env \
-  --confirm-npu-ids 0,1,2,3
+1. W8A8 模型、DeepSeek-V4 拓扑和 910B1 兼容门禁；
+2. route-capture label/source marker、vLLM `0.22.1`、vLLM-Ascend
+   `0.22.1rc1` 和模型实现；
+3. 记录运行中容器的 NPU 映射；映射本身只告警，不误判空容器为占卡任务；
+4. 宿主机 `0..7` 到容器 `0..7` 的八卡 tensor smoke；
+5. API 端口和运行目录不冲突。
+
+成功后输出：
+
+```text
+W8A8_MODEL_AUDIT_OK
+RUNNING_CONTAINER_NPU_CHECK_OK
+DEVICE_MAPPING_OK
+LAUNCH_OK
 ```
 
-确认参数必须和 `HOST_NPU_IDS` 完全一致。脚本会保存：
+如果存在空容器设备映射，第一个标志会改为
+`RUNNING_CONTAINER_NPU_MAPPINGS_RECORDED`，这不是失败。若 `npu-smi info` 显示
+真实计算进程或管理员未把卡分给你，则不要继续。
+
+运行合同保存在：
 
 ```text
 ${RUN_ROOT}/${RUN_ID}/model-audit.json
@@ -201,45 +205,32 @@ ${RUN_ROOT}/${RUN_ID}/launch.command.sh
 ${RUN_ROOT}/${RUN_ID}/run.env
 ```
 
-服务配置来自 vLLM-Ascend 四卡测试，但为路由实验做了收敛：
+## 7. 等待服务就绪
 
-- TP=4、EP 开启；
-- 从 `model-audit.json` 自动选择量化参数：当前 mixed checkpoint 使用
-  `--quantization fp8`（或配置中原样的 `deepseek_v4_fp8`），ModelSlim checkpoint
-  才使用 `--quantization ascend`；
-- `max_model_len=8192`；
-- `max_num_seqs=1`；
-- `--enable-return-routed-experts`；
-- eager、关闭 async scheduling、prefix caching、EPLB 和动态负载均衡；
-- 不启用 MTP speculative decoding，避免把 draft model 路由混进主模型基线。
-
-加载权重前还会执行四卡 device smoke，成功标志是
-`DEVICE_MAPPING_OK`。它只在每张卡分配一个极小 tensor，用来验证物理卡到容器
-逻辑卡 `0..3` 的映射。
-
-等待模型加载：
+模型约 279 GiB，并且从网络挂载读取，首次加载可能较慢：
 
 ```bash
-bash scripts/02_wait_ready.sh configs/node0.env
+bash scripts/02_wait_ready.sh configs/node1_w8a8.env
 ```
 
-模型加载期间看到 connection refused 是正常的。脚本使用 `--noproxy '*'` 访问
-loopback，不会把本地请求发送到服务器代理；最终应输出：
+最终应输出：
 
 ```text
 SERVICE_READY
 ```
 
-另一个终端可以查看状态：
+另一个终端查看状态和最近日志：
 
 ```bash
-bash scripts/06_status.sh configs/node0.env
+bash scripts/06_status.sh configs/node1_w8a8.env
 ```
 
-## 6. 先做一条路由冒烟
+加载期间 `127.0.0.1:7100` connection refused 是正常状态；容器退出则不是。
+
+## 8. 路由采集 smoke
 
 ```bash
-bash scripts/03_smoke_capture.sh configs/node0.env
+bash scripts/03_smoke_capture.sh configs/node1_w8a8.env
 ```
 
 成功标志：
@@ -248,62 +239,53 @@ bash scripts/03_smoke_capture.sh configs/node0.env
 CAPTURE_OK benchmark=smoke requests=1
 ```
 
-采集器会动态读取模型拓扑并检查：
+采集器会从模型配置动态读取 layer、Expert 和 Top-K，并验证：
 
-- 路由 shape 是 `(prompt_tokens + completion_tokens - 1, layers, top_k)`；
-- dense 层路由全为零；
-- MoE Expert ID 位于合法范围；
+- 路由 shape 为 `(prompt_tokens + completion_tokens - 1, layers, top_k)`；
+- dense 层不包含非零路由；
+- Expert ID 范围合法；
 - 每个 token/layer 的 Top-K Expert 不重复；
-- 路由不是固定或陈旧的常量。
+- 返回数据不是固定或陈旧常量。
 
-因此它不会套用 GLM 的 78 层、75 个 MoE 层和 256 Expert 常量。
+## 9. 先跑每类 5 条 benchmark
 
-## 7. 先各跑 5 条 benchmark
-
-使用的输入来自：
-
-```text
-/data/node0_disk2/glm52-study/runs/benchmark-data/inputs/
-```
-
-先检查文件：
+先确认准备好的输入条数：
 
 ```bash
-source configs/node0.env
+source configs/node1_w8a8.env
 wc -l "${BENCHMARK_DATA_ROOT}"/inputs/*.jsonl
 ```
 
-先各跑 5 条，预计很快暴露格式、上下文或路由问题：
+执行小规模预跑：
 
 ```bash
 bash scripts/04_run_benchmarks.sh \
-  configs/node0.env \
+  configs/node1_w8a8.env \
   --benchmarks mmlu_pro,swebench_lite,livecodebench,ruler_niah \
   --max-requests 5
 ```
 
-这里的“全量”指运行 JSONL 中已经准备好的全部记录。你之前准备数据时使用了
-`--limit 50`，因此每个文件是 50 条路由 workload，不是原 benchmark 的完整官方
-评测集，也不计算官方 benchmark 分数。
+这里运行的是已经准备好的 JSONL workload。之前数据准备使用了 `--limit 50`，
+所以每个文件最多 50 条，不是官方 benchmark 全集，也不计算官方任务分数。
 
-冒烟通过后继续剩余记录，不重复已经成功的请求：
+## 10. 继续完整 50 条 workload
+
+5 条全部成功后，从已有进度继续：
 
 ```bash
 bash scripts/04_run_benchmarks.sh \
-  configs/node0.env \
+  configs/node1_w8a8.env \
   --benchmarks mmlu_pro,swebench_lite,livecodebench,ruler_niah \
   --resume
 ```
 
-每条请求单独保存 request、去掉大体积路由字段后的 response 和 `.npy` 路由；每次
-成功后原子更新 aggregate。中断后可以继续 `--resume`。
+每条请求会保存 request、去除大体积路由后的 response 和 `.npy` 路由，并原子更新
+aggregate；中断后仍可再次执行 `--resume`。
 
-## 8. 分析 20/90 和 benchmark 差异
-
-5 条预跑结束后就可以先生成一次分析，完整运行后再执行同一命令覆盖派生报表：
+## 11. 分析 20/90 与 benchmark 差异
 
 ```bash
-bash scripts/05_analyze.sh configs/node0.env
+bash scripts/05_analyze.sh configs/node1_w8a8.env
 ```
 
 主要输出：
@@ -316,116 +298,94 @@ ${RUN_ROOT}/${RUN_ID}/analysis/pairwise.csv
 ${RUN_ROOT}/${RUN_ID}/analysis/analysis.json
 ```
 
-### 8.1 20% Expert 是否处理 90% token
+报告分别统计 total、prefill、decode：
 
-报告分别计算：
+- 每层 Top-20% Expert 的 assignment share；
+- 全模型 Top-20% `(layer, expert)` 权重的 assignment share；
+- 达到 90% assignment 实际需要的 Expert 比例；
+- benchmark 两两之间的 Jensen-Shannon divergence；
+- 热 Expert 集合的逐层 Jaccard。
 
-1. 每个 MoE 层各取 `ceil(20% × num_experts)`，然后汇总各层 Top-20% share；
-2. 把 `(layer, expert)` 当作独立权重，从全模型选择 20% 最热权重；
-3. 达到 90% assignment 实际需要多少 Expert 或 layer-expert 权重；
-4. total、prefill、decode 三种阶段分别统计。
+`expert 7` 在不同层对应不同权重，不能只按跨层 Expert ID 汇总就宣称满足
+20/90。HBM/DRAM 放置应重点看 per-layer 和 `(layer, expert)` 结果。
 
-HBM/DRAM 放置最应关注前两种。`expert 7` 在不同层是不同权重，不能只把 Expert ID
-跨层相加后宣称满足 20/90；报告中的 pooled Expert-ID 只作为诊断指标。
-
-### 8.2 benchmark 是否改变 Expert 分布
-
-`pairwise.csv` 对每两个 benchmark 输出：
-
-- 各层 Jensen-Shannon divergence 的均值和最大值；
-- 全部 layer-expert 分布的 JSD；
-- Top-20% 热 Expert 集合的逐层平均 Jaccard；
-- total、prefill、decode 分阶段结果。
-
-JSD 越大、Top-20% Jaccard 越小，任务类型相关的路由差异越强。最终结论应使用
-完整 50 条 workload，并报告 token 数和 bootstrap/重复实验，而不是只看 5 条冒烟。
-
-## 9. 停止服务并恢复占卡
+## 12. 停止并恢复 keep-alive
 
 保存日志、停止并删除本实验拥有的容器：
 
 ```bash
-bash scripts/07_stop.sh configs/node0.env --remove
+bash scripts/07_stop.sh configs/node1_w8a8.env --remove
 ```
 
-脚本会核对容器的 run-id label，不会按模糊名称停止其他人的容器。最后会打印本次
-物理卡号。按照服务器要求，手动恢复且只恢复这四张卡上的 keep-alive。
+脚本核对 run-id label，不会按模糊名称停止其他容器。完成后按照服务器规则，手动
+恢复且只恢复 `0..7` 的 keep-alive。
 
-下一次运行不需要重新下载模型、benchmark 或镜像：重新确认四张卡，执行第 4、5
-节即可生成新的 run ID。
+下次运行不需要重新下载模型、benchmark 或镜像，从第 4 节重新预检即可。
 
-## 10. 常见错误
+## 13. 常见错误
 
-### `W4A8 Expert execution was not proven`
+### `W8A8 Expert execution was not proven`
 
-先确认远端已更新新版 `00_audit_model.py`。新版会识别 DeepSeek-V4 原生
-FP8+FP4 mixed profile，不要求配置里出现字面量 `W4A8`。如果仍失败，保存 audit
-JSON 后确认权重来源；不要换成 279 GiB 的 W8A8 目录。
+确认 `MODEL_HOST_PATH` 指向带 `quant_model_description.json` 的
+`DeepSeek-V4-Flash-w8a8-mtp`，不是原生 `DeepSeek-V4-Flash` mixed 目录。
 
-### audit 显示未引用 shard
+### `RUNNING_CONTAINER_NPU_MAPPINGS_RECORDED`
 
-这表示目录里存在 `model.safetensors.index.json` 没有引用的额外权重文件。实验记录
-使用 `active_shard_gib`；vLLM 加载器会按 index 过滤它们。它不是缺分片错误，暂时
-不要清理公共目录。
-
-### 启动日志提示 quantization 不匹配
-
-不要手工把当前 mixed checkpoint 改成 `--quantization ascend`。检查：
+脚本检测到某个运行中容器映射了选中设备。查看：
 
 ```bash
-source configs/node0.env
+source configs/node1_w8a8.env
 RUN_ID=$(tr -d '[:space:]' < "${RUN_ROOT}/current-run-id")
-grep -E 'deployment_profile|recommended_vllm_quantization' \
-  "${RUN_ROOT}/${RUN_ID}/model-audit.json"
-grep -E 'quantization_profile|vllm_quantization' \
-  "${RUN_ROOT}/${RUN_ID}/run.env"
+cat "${RUN_ROOT}/${RUN_ID}/running-containers.before.json"
 ```
 
-二者必须一致；当前模型预期是 native mixed profile 和 `fp8`（或配置原值
-`deepseek_v4_fp8`）。
+这不是失败，也不等同于卡正在计算。不要自动停止该容器；结合 `npu-smi info`、
+keep-alive 状态和管理员分配确认八卡确实空闲。
 
-### 镜像没有 `vllm_ascend.models.deepseek_v4`
+### `Docker image is absent`
 
-镜像版本不对。使用 `v0.22.1rc1` 基础镜像或之前相同版本的 GLM 派生镜像。
-
-### 模型加载过程中 connection refused
-
-服务尚未监听端口。继续看 `02_wait_ready.sh` 或 `06_status.sh`，不要重复创建容器。
-
-### 容器早退或 OOM
+Node1 尚无目标镜像。先核对现有 tag；不要因为 tag 不同就盲目重新拉取：
 
 ```bash
-source configs/node0.env
+docker images --format '{{.Repository}}:{{.Tag}} {{.ID}}' | sort
+```
+
+本实验需要的是已经构建好的
+`glm52-expert-capture:v0.22.1rc1-w8a8-v1`，不是裸基础镜像。如果只有相同 image ID
+而 tag 缺失，可在确认 ID 后补 tag；不要重新联网拉取模型或数据。
+
+### 模型加载超时或容器退出
+
+```bash
+bash scripts/06_status.sh configs/node1_w8a8.env
+```
+
+或读取保存的退出日志：
+
+```bash
+source configs/node1_w8a8.env
 RUN_ID=$(tr -d '[:space:]' < "${RUN_ROOT}/current-run-id")
-sed -n '1,260p' "${RUN_ROOT}/${RUN_ID}/container.early-exit.log"
+sed -n '1,300p' "${RUN_ROOT}/${RUN_ID}/container.exit.log"
 ```
-
-如果日志不存在：
-
-```bash
-bash scripts/06_status.sh configs/node0.env
-```
-
-不要直接降低审计门禁或改成 W8A8。先保留完整日志、模型 audit 和实际卡号。
 
 ### `routed_experts is missing`
 
-确认启动命令包含 `--enable-return-routed-experts`，并确认镜像是准确的
-vLLM/vLLM-Ascend 版本。不要用旧镜像重试。
+确认保存的 `launch.command.sh` 包含 `--enable-return-routed-experts`，并确认镜像内
+vLLM/vLLM-Ascend 版本通过 image audit。
 
-## 11. 本地与远端测试
+## 14. 本地与远端测试
 
-Shell/Python 静态检查：
+静态检查：
 
 ```bash
 for script in scripts/*.sh; do bash -n "${script}"; done
-python3 -m compileall -q scripts
+python3 -m compileall -q scripts tests
 ```
 
-远端 Python 环境已有 NumPy 时运行单元测试：
+远端 Python 环境带 NumPy 时运行全部测试：
 
 ```bash
 python3 -m unittest discover -s tests -v
 ```
 
-这些测试只构造小型临时 JSON/NPZ，不加载或下载模型。
+测试只构造小型临时 JSON/NPZ，不下载模型，也不占 NPU。

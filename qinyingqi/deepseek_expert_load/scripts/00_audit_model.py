@@ -83,22 +83,32 @@ def quantization_summary(
         expert_dtype_source = "vllm-0.22.1-default"
 
     explicit_w4a8 = marker_counts["W4A8"] > 0
+    explicit_w8a8 = marker_counts["W8A8"] > 0
     native_fp8_fp4 = native_fp8 and expert_dtype == "fp4"
     if description_path.is_file() and explicit_w4a8:
         deployment_profile = "modelslim_w4a8"
         recommended_quantization = "ascend"
+        expert_quantization = "w4a8"
+    elif description_path.is_file() and explicit_w8a8:
+        deployment_profile = "modelslim_w8a8"
+        recommended_quantization = "ascend"
+        expert_quantization = "w8a8"
     elif native_fp8_fp4:
         deployment_profile = "deepseek_v4_native_fp8_fp4"
         # Match config.json exactly. vLLM-Ascend registers both names to its
         # FP8 config, which selects the W4A8 MoE scheme for FusedMoE layers.
         recommended_quantization = quant_method
+        expert_quantization = "w4a8_mxfp4"
     else:
         deployment_profile = "unsupported_or_unproven"
         recommended_quantization = None
+        expert_quantization = None
 
     evidence: list[str] = []
     if explicit_w4a8:
         evidence.append("explicit_w4a8_marker")
+    if explicit_w8a8:
+        evidence.append("explicit_w8a8_marker")
     if native_fp8_fp4:
         evidence.append("deepseek_v4_fp8_linear_plus_fp4_experts")
     return {
@@ -108,9 +118,12 @@ def quantization_summary(
         "expert_dtype": expert_dtype,
         "expert_dtype_source": expert_dtype_source,
         "explicit_w4a8_marker_detected": explicit_w4a8,
+        "explicit_w8a8_marker_detected": explicit_w8a8,
         "native_fp8_fp4_detected": native_fp8_fp4,
         "w4a8_detected": explicit_w4a8 or native_fp8_fp4,
+        "w8a8_detected": explicit_w8a8,
         "w4a8_evidence": evidence,
+        "expert_quantization": expert_quantization,
         "deployment_profile": deployment_profile,
         "recommended_vllm_quantization": recommended_quantization,
         "quant_model_description_present": description_path.is_file(),
@@ -214,6 +227,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output", type=Path)
     parser.add_argument("--require-model-type", default="")
     parser.add_argument("--require-w4a8", action="store_true")
+    parser.add_argument(
+        "--require-expert-quantization",
+        choices=("w4a8", "w8a8"),
+        default="",
+    )
+    parser.add_argument("--target-soc", default="")
     return parser.parse_args()
 
 
@@ -234,21 +253,76 @@ def main() -> int:
     problems.extend(weight_problems)
     quantization = quantization_summary(model_path, config, topology.model_type)
 
+    required_expert_quantization = args.require_expert_quantization
+    if args.require_w4a8:
+        if required_expert_quantization not in ("", "w4a8"):
+            raise ValueError(
+                "--require-w4a8 conflicts with "
+                f"--require-expert-quantization={required_expert_quantization}"
+            )
+        required_expert_quantization = "w4a8"
+
+    target_soc = re.sub(r"[^A-Z0-9]", "", args.target_soc.upper())
+    soc_compatible: bool | None = None
+    soc_evidence: list[str] = []
+    if target_soc:
+        if (
+            quantization["deployment_profile"]
+            == "deepseek_v4_native_fp8_fp4"
+            and "910B" in target_soc
+        ):
+            soc_compatible = False
+            soc_evidence.append(
+                "native MXFP4 uses float4_e2m1fn_x2 customize_dtype, which "
+                "Ascend 910B does not support"
+            )
+        elif (
+            quantization["deployment_profile"] == "modelslim_w8a8"
+            and "910B" in target_soc
+        ):
+            soc_compatible = True
+            soc_evidence.append(
+                "vLLM-Ascend documents DeepSeek-V4-Flash W8A8 on one "
+                "8-card Atlas 800 A2 node"
+            )
+
     if args.require_model_type and topology.model_type != args.require_model_type:
         problems.append(
             f"model_type must be {args.require_model_type!r}, got {topology.model_type!r}"
         )
-    if args.require_w4a8 and not quantization["w4a8_detected"]:
+    actual_expert_quantization = quantization["expert_quantization"]
+    if required_expert_quantization == "w4a8" and actual_expert_quantization not in {
+        "w4a8",
+        "w4a8_mxfp4",
+    }:
         problems.append(
             "W4A8 Expert execution was not proven by an explicit ModelSlim "
             "marker or a DeepSeek-V4 FP8+FP4 configuration"
         )
+    if (
+        required_expert_quantization == "w8a8"
+        and actual_expert_quantization != "w8a8"
+    ):
+        problems.append(
+            "W8A8 Expert execution was not proven by quant_model_description.json"
+        )
+    if soc_compatible is False:
+        problems.append(
+            f"deployment profile {quantization['deployment_profile']!r} is "
+            f"incompatible with target SoC {args.target_soc!r}"
+        )
 
     report = {
-        "schema_version": 2,
+        "schema_version": 3,
         "model_path": str(model_path),
         "topology": topology.to_dict(),
         "quantization": quantization,
+        "hardware": {
+            "target_soc": args.target_soc or None,
+            "normalized_target_soc": target_soc or None,
+            "soc_compatible": soc_compatible,
+            "evidence": soc_evidence,
+        },
         "weights": weights,
         "warnings": warnings,
         "problems": problems,

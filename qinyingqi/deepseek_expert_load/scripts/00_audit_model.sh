@@ -17,5 +17,6 @@ fi
 python3 "${SCRIPT_DIR}/00_audit_model.py" \
     --model-path "${MODEL_HOST_PATH}" \
     --require-model-type deepseek_v4 \
-    --require-w4a8 \
+    --require-expert-quantization "${REQUIRED_EXPERT_QUANTIZATION:-w4a8}" \
+    --target-soc "${TARGET_SOC:-ASCEND910B1}" \
     "${OUTPUT_ARGS[@]}"

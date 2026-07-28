@@ -82,7 +82,60 @@ class AuditCliTests(unittest.TestCase):
                 report["quantization"]["recommended_vllm_quantization"],
                 "ascend",
             )
+            self.assertEqual(
+                report["quantization"]["expert_quantization"],
+                "w4a8",
+            )
             self.assertEqual(report["weights"]["shard_count"], 2)
+
+    def test_w8a8_model_audit_on_910b1(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            model = Path(temporary) / "model"
+            model.mkdir()
+            (model / "config.json").write_text(
+                json.dumps(
+                    {
+                        "model_type": "deepseek_v4",
+                        "num_hidden_layers": 4,
+                        "n_routed_experts": 16,
+                        "num_experts_per_tok": 2,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (model / "quant_model_description.json").write_text(
+                json.dumps(
+                    {"model.layers.0.mlp.experts.weight": "W8A8_DYNAMIC"}
+                ),
+                encoding="utf-8",
+            )
+            (model / "model.safetensors").write_bytes(b"weights")
+            result = run_python(
+                "00_audit_model.py",
+                "--model-path",
+                str(model),
+                "--require-model-type",
+                "deepseek_v4",
+                "--require-expert-quantization",
+                "w8a8",
+                "--target-soc",
+                "ASCEND910B1",
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            report = json.loads(result.stdout)
+            quantization = report["quantization"]
+            self.assertTrue(report["compatible"])
+            self.assertTrue(quantization["w8a8_detected"])
+            self.assertEqual(
+                quantization["deployment_profile"],
+                "modelslim_w8a8",
+            )
+            self.assertEqual(quantization["expert_quantization"], "w8a8")
+            self.assertEqual(
+                quantization["recommended_vllm_quantization"],
+                "ascend",
+            )
+            self.assertTrue(report["hardware"]["soc_compatible"])
 
     def test_native_fp8_fp4_model_audit(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -152,6 +205,28 @@ class AuditCliTests(unittest.TestCase):
             self.assertEqual(report["weights"]["unreferenced_shard_count"], 2)
             self.assertEqual(report["weights"]["unreferenced_shard_bytes"], 7)
             self.assertEqual(len(report["warnings"]), 1)
+
+            incompatible = run_python(
+                "00_audit_model.py",
+                "--model-path",
+                str(model),
+                "--require-model-type",
+                "deepseek_v4",
+                "--require-expert-quantization",
+                "w4a8",
+                "--target-soc",
+                "ASCEND910B1",
+            )
+            self.assertEqual(incompatible.returncode, 2)
+            incompatible_report = json.loads(incompatible.stdout)
+            self.assertFalse(incompatible_report["compatible"])
+            self.assertFalse(incompatible_report["hardware"]["soc_compatible"])
+            self.assertTrue(
+                any(
+                    "incompatible with target SoC" in problem
+                    for problem in incompatible_report["problems"]
+                )
+            )
 
     def test_native_fp8_experts_do_not_pass_w4a8_gate(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
