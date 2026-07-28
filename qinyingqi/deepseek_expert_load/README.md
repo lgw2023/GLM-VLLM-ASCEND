@@ -17,7 +17,7 @@ Mac 不下载模型和 benchmark。模型、镜像、NPU 计算和结果都留�
 硬件：8 x Ascend 910B1 64 GiB
 并行：DP=1, TP=8, EP=on
 量化：ModelSlim W8A8, --quantization ascend
-镜像：deepseek-v4-expert-capture:v0.22.1rc1-w8a8-v2
+镜像：deepseek-v4-expert-capture:v0.22.1rc1-w8a8-v3
 API：http://127.0.0.1:7100/v1
 结果：/data/disk2/deepseek-expert-load-w8a8/runs
 ```
@@ -30,8 +30,9 @@ Atlas 800 A2、8 x 64 GiB 部署 W8A8：
 本实验使用官方资源拓扑，但为 Expert 路由基线关闭 MTP、async scheduling、
 prefix caching、EPLB 和动态负载均衡；否则可能把额外运行机制混入任务分布差异。
 派生镜像在 vLLM-Ascend 通用 `W8A8_DYNAMIC` MoE 执行方法中，调用 Ascend 的
-`FusedMoE` routed-expert capturer 来保存 logical Expert ID。启动脚本会同时核验
-Docker label 和源码 marker，裸基础镜像或旧的 v1 capture 镜像无法通过。
+`FusedMoE` routed-expert capturer 来保存 logical Expert ID，并在 DP=1、TP=8 的
+prefill 中汇聚 sequence-parallel token 行。启动脚本会同时核验 Docker label 和两个
+源码 marker，裸基础镜像或旧 v1/v2 capture 镜像无法通过。
 
 ### 1.2 不再在 A2 上启动原生 FP8+MXFP4 目录
 
@@ -89,8 +90,8 @@ grep -E '^(IMAGE_REF|CAPTURE_PATCH_ID|MODEL_HOST_PATH|BENCHMARK_DATA_ROOT|RUN_RO
 应为：
 
 ```text
-IMAGE_REF=deepseek-v4-expert-capture:v0.22.1rc1-w8a8-v2
-CAPTURE_PATCH_ID=deepseek-v4-w8a8-logical-topk-v2
+IMAGE_REF=deepseek-v4-expert-capture:v0.22.1rc1-w8a8-v3
+CAPTURE_PATCH_ID=deepseek-v4-w8a8-logical-topk-v3
 MODEL_HOST_PATH=/data/node0_disk1/Public/DeepSeek-V4-Flash-w8a8-mtp
 BENCHMARK_DATA_ROOT=/data/node0_disk2/glm52-study/runs/benchmark-data
 RUN_ROOT=/data/disk2/deepseek-expert-load-w8a8/runs
@@ -140,9 +141,9 @@ done
 使用；以管理员分配、`npu-smi info` 中的进程/显存状态和 keep-alive 状态为准。
 不要停止或删除其他人的容器。
 
-### 4.1 构建 DeepSeek v2 route-capture 镜像
+### 4.1 构建 DeepSeek v3 route-capture 镜像
 
-首次运行，或此前配置仍然指向 `glm52-expert-capture:...-v1` 时，在 Node1 执行：
+首次运行，或此前配置仍然指向任意 v1/v2 image 时，在 Node1 执行：
 
 ```bash
 bash scripts/07_build_capture_image.sh
@@ -152,12 +153,12 @@ bash scripts/07_build_capture_image.sh
 模型或 benchmark，也不占用 NPU。若基础镜像确实不存在，才在网络正常时显式加
 `--confirm-pull-base`。
 
-已有的 `configs/node1_w8a8.env` 不会被 `git pull` 覆盖，因此从 v1 迁移时必须执行：
+已有的 `configs/node1_w8a8.env` 不会被 `git pull` 覆盖，因此迁移到 v3 时必须执行：
 
 ```bash
 sed -i \
-  -e 's#^IMAGE_REF=.*#IMAGE_REF=deepseek-v4-expert-capture:v0.22.1rc1-w8a8-v2#' \
-  -e 's#^CAPTURE_PATCH_ID=.*#CAPTURE_PATCH_ID=deepseek-v4-w8a8-logical-topk-v2#' \
+  -e 's#^IMAGE_REF=.*#IMAGE_REF=deepseek-v4-expert-capture:v0.22.1rc1-w8a8-v3#' \
+  -e 's#^CAPTURE_PATCH_ID=.*#CAPTURE_PATCH_ID=deepseek-v4-w8a8-logical-topk-v3#' \
   configs/node1_w8a8.env
 
 source configs/node1_w8a8.env
@@ -165,8 +166,8 @@ docker image inspect "${IMAGE_REF}" \
   --format '{{.RepoTags}} patch={{index .Config.Labels "deepseek.capture_patch_id"}}'
 ```
 
-最后一行必须显示 `deepseek-v4-w8a8-logical-topk-v2`。不要把旧的
-`glm52-expert-capture:...-v1` tag 重命名为 v2：它没有正确调用 Ascend capturer。
+最后一行必须显示 `deepseek-v4-w8a8-logical-topk-v3`。不要把旧 image 重命名为
+v3：v1 没有正确调用 Ascend capturer，v2 没有汇聚 TP=8 prefill 的其余 token 行。
 
 ## 5. 审计 W8A8 模型
 
@@ -383,8 +384,8 @@ docker images --format '{{.Repository}}:{{.Tag}} {{.ID}}' | sort
 ```
 
 本实验需要的是已经构建好的
-`deepseek-v4-expert-capture:v0.22.1rc1-w8a8-v2`，不是裸基础镜像。先运行
-`bash scripts/07_build_capture_image.sh`；不要把旧 v1 镜像重新打 tag，也不要重新
+`deepseek-v4-expert-capture:v0.22.1rc1-w8a8-v3`，不是裸基础镜像。先运行
+`bash scripts/07_build_capture_image.sh`；不要把旧 v1/v2 镜像重新打 tag，也不要重新
 联网下载模型或 benchmark。
 
 ### 模型加载超时或容器退出
@@ -411,15 +412,17 @@ vLLM/vLLM-Ascend 版本通过 image audit。
 不要继续跑 benchmark，也不要放宽这个校验。对于 DeepSeek-V4 的 `top_k=6`，同一
 token/layer 的 6 个 logical Expert ID 必须互异。旧
 `glm52-expert-capture:...-v1` 调用了 upstream 的 `router.capture_fn`，但 Ascend
-W8A8 路径实际把 capturer 绑定在 `FusedMoE._ascend_routed_experts_capturer`；因此旧
-镜像可能返回未写入的全零 buffer，产生重复 ID。
+W8A8 路径实际把 capturer 绑定在 `FusedMoE._ascend_routed_experts_capturer`；因此 v1
+可能返回未写入的全零 buffer。v2 修正了该 hook，但在 DP=1、TP=8 prefill 中只保存
+rank 0 的 sequence-parallel shard，剩余 token 行仍然是全零。v3 会在写 buffer 前通过
+TP group all-gather 恢复完整的 logical route tensor。
 
-按第 4.1 节构建 v2 镜像、更新本地 env，然后停止旧服务并新建一个 run：
+按第 4.1 节构建 v3 镜像、更新本地 env，然后停止旧服务并新建一个 run：
 
 ```bash
 bash scripts/07_stop.sh configs/node1_w8a8.env --remove
 
-export RUN_ID="dsv4-w8a8-tp8-v2-$(date -u +%Y%m%dT%H%M%SZ)"
+export RUN_ID="dsv4-w8a8-tp8-v3-$(date -u +%Y%m%dT%H%M%SZ)"
 bash scripts/08_launch_tp8_w8a8.sh \
   configs/node1_w8a8.env \
   --confirm-npu-ids 0,1,2,3,4,5,6,7
@@ -427,7 +430,7 @@ bash scripts/02_wait_ready.sh configs/node1_w8a8.env
 bash scripts/03_smoke_capture.sh configs/node1_w8a8.env
 ```
 
-旧 run 中产生的 smoke 或 benchmark route 文件不具备分析价值，不能与 v2 结果混合。
+旧 run 中产生的 smoke 或 benchmark route 文件不具备分析价值，不能与 v3 结果混合。
 
 ## 14. 本地与远端测试
 

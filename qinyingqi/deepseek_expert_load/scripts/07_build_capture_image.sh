@@ -6,8 +6,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib.sh"
 
 BASE_IMAGE_DEFAULT="quay.io/ascend/vllm-ascend:v0.22.1rc1"
-OUTPUT_IMAGE_DEFAULT="deepseek-v4-expert-capture:v0.22.1rc1-w8a8-v2"
-PATCH_ID_DEFAULT="deepseek-v4-w8a8-logical-topk-v2"
+OUTPUT_IMAGE_DEFAULT="deepseek-v4-expert-capture:v0.22.1rc1-w8a8-v3"
+PATCH_ID_DEFAULT="deepseek-v4-w8a8-logical-topk-v3"
 EXPECTED_VLLM_VERSION="0.22.1"
 EXPECTED_VLLM_ASCEND_VERSION="0.22.1rc1"
 
@@ -119,16 +119,27 @@ existing = [path for path in paths if path.is_file()]
 if len(existing) != 1:
     raise RuntimeError(f"expected one installed W8A8 source file, got {existing}")
 source = existing[0].read_text(encoding="utf-8")
-marker = "# DEEPSEEK_V4_W8A8_ROUTE_CAPTURE_V2"
+marker = "# DEEPSEEK_V4_W8A8_ROUTE_CAPTURE_V3"
 if source.count(marker) != 1:
     raise RuntimeError("DeepSeek W8A8 capture marker is absent or duplicated")
 if source.index(marker) > source.index("        if zero_expert_num > 0"):
     raise RuntimeError("capture marker is after logical-ID remapping")
 if "capturer.capture(layer_id=layer.layer_id, topk_ids=topk_ids)" not in source:
     raise RuntimeError("Ascend routed-experts capturer call is absent")
-print(source.count(marker))')"
-[[ "${MARKER_COUNT}" == 1 ]] || \
-    die "derived image does not contain exactly one DeepSeek W8A8 capture hook"
+capture_paths = [Path(root) / "patch/worker/patch_routed_experts_capture.py"
+                 for root in spec.submodule_search_locations]
+capture_existing = [path for path in capture_paths if path.is_file()]
+if len(capture_existing) != 1:
+    raise RuntimeError(f"expected one routed-experts capture source file, got {capture_existing}")
+capture_source = capture_existing[0].read_text(encoding="utf-8")
+capture_marker = "# DEEPSEEK_V4_TP8_CAPTURE_GATHER_V3"
+if capture_source.count(capture_marker) != 1:
+    raise RuntimeError("DeepSeek TP8 capture-gather marker is absent or duplicated")
+if "dist.all_gather(list(gathered_splits), topk_ids, get_tp_group().device_group)" not in capture_source:
+    raise RuntimeError("TP8 routed-experts all-gather call is absent")
+print("CAPTURE_PATCH_SOURCES_OK")')"
+[[ "${MARKER_COUNT}" == CAPTURE_PATCH_SOURCES_OK ]] || \
+    die "derived image does not contain the required DeepSeek capture hooks"
 
 printf '\nCAPTURE_IMAGE_OK image_ref=%s patch_id=%s\n' "${OUTPUT_IMAGE}" "${PATCH_ID}"
 printf 'Set these exact values in configs/node1_w8a8.env:\n'
