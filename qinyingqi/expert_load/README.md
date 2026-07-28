@@ -268,8 +268,11 @@ mkdir -p "${TRANSFER_DIR}"
 
 docker save --output "${TRANSFER_DIR}/glm52-expert-capture-v0.22.1rc1-w8a8-v1.tar" \
   "${CAPTURE_IMAGE}"
-sha256sum "${TRANSFER_DIR}/glm52-expert-capture-v0.22.1rc1-w8a8-v1.tar" \
-  > "${TRANSFER_DIR}/glm52-expert-capture-v0.22.1rc1-w8a8-v1.tar.sha256"
+(
+  cd "${TRANSFER_DIR}"
+  sha256sum glm52-expert-capture-v0.22.1rc1-w8a8-v1.tar \
+    > glm52-expert-capture-v0.22.1rc1-w8a8-v1.tar.sha256
+)
 ```
 
 把这两个文件通过已可用的节点内传输方式送到 node0 的

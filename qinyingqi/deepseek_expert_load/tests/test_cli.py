@@ -1,0 +1,132 @@
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+import numpy as np
+
+
+ROOT = Path(__file__).resolve().parents[1]
+SCRIPTS = ROOT / "scripts"
+
+
+def run_python(script: str, *arguments: str) -> subprocess.CompletedProcess[str]:
+    environment = os.environ.copy()
+    environment["PYTHONPYCACHEPREFIX"] = str(Path(tempfile.gettempdir()) / "dsv4-test-pycache")
+    return subprocess.run(
+        [sys.executable, str(SCRIPTS / script), *arguments],
+        check=False,
+        text=True,
+        capture_output=True,
+        env=environment,
+    )
+
+
+class AuditCliTests(unittest.TestCase):
+    def test_w4a8_model_audit(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            model = Path(temporary) / "model"
+            model.mkdir()
+            (model / "config.json").write_text(
+                json.dumps(
+                    {
+                        "model_type": "deepseek_v4",
+                        "num_hidden_layers": 4,
+                        "n_routed_experts": 16,
+                        "num_experts_per_tok": 2,
+                        "first_k_dense_replace": 1,
+                        "moe_layer_freq": 1,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (model / "quant_model_description.json").write_text(
+                json.dumps({"model.layers.1.mlp.experts.weight": "W4A8_DYNAMIC"}),
+                encoding="utf-8",
+            )
+            (model / "model-00001-of-00002.safetensors").write_bytes(b"a")
+            (model / "model-00002-of-00002.safetensors").write_bytes(b"bb")
+            (model / "model.safetensors.index.json").write_text(
+                json.dumps(
+                    {
+                        "weight_map": {
+                            "model.a": "model-00001-of-00002.safetensors",
+                            "model.b": "model-00002-of-00002.safetensors",
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            output = Path(temporary) / "audit.json"
+            result = run_python(
+                "00_audit_model.py",
+                "--model-path",
+                str(model),
+                "--require-model-type",
+                "deepseek_v4",
+                "--require-w4a8",
+                "--output",
+                str(output),
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            report = json.loads(output.read_text(encoding="utf-8"))
+            self.assertTrue(report["compatible"])
+            self.assertTrue(report["quantization"]["w4a8_detected"])
+            self.assertEqual(report["weights"]["shard_count"], 2)
+
+
+class AnalysisCliTests(unittest.TestCase):
+    @staticmethod
+    def write_aggregate(path: Path, benchmark: str, hot_expert: int) -> None:
+        path.mkdir()
+        counts = np.zeros((3, 2, 10), dtype=np.int64)
+        for phase in range(3):
+            for layer in range(2):
+                counts[phase, layer, hot_expert] = 90
+                counts[phase, layer, (hot_expert + 1) % 10] = 10
+        np.savez_compressed(
+            path / "aggregate-counts.npz",
+            schema_version=np.array([1]),
+            benchmark=np.array([benchmark]),
+            phase_names=np.array(["total", "prefill", "decode"]),
+            counts=counts,
+            moe_layer_indices=np.array([1, 2]),
+            num_hidden_layers=np.array([3]),
+            num_experts=np.array([10]),
+            top_k=np.array([2]),
+            request_count=np.array([2]),
+            prompt_tokens=np.array([20]),
+            completion_tokens=np.array([10]),
+        )
+
+    def test_analysis_and_pairwise_outputs(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            first = root / "bench-a"
+            second = root / "bench-b"
+            output = root / "analysis"
+            self.write_aggregate(first, "bench_a", 0)
+            self.write_aggregate(second, "bench_b", 8)
+            result = run_python(
+                "05_analyze_expert_load.py",
+                str(first),
+                str(second),
+                "--output-dir",
+                str(output),
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            report = json.loads((output / "analysis.json").read_text(encoding="utf-8"))
+            self.assertEqual(len(report["summaries"]), 6)
+            self.assertEqual(len(report["pairwise"]), 3)
+            self.assertGreater(report["pairwise"][0]["pooled_layer_expert_jsd"], 0.5)
+            self.assertTrue(report["summaries"][0]["global_top20_ge_90"])
+            self.assertTrue((output / "report.md").is_file())
+
+
+if __name__ == "__main__":
+    unittest.main()
