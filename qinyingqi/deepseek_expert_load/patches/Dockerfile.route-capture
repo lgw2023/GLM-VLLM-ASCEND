@@ -1,0 +1,15 @@
+ARG BASE_IMAGE=quay.io/ascend/vllm-ascend:v0.22.1rc1
+FROM ${BASE_IMAGE}
+
+ARG BASE_IMAGE
+ARG CAPTURE_PATCH_ID=deepseek-v4-w8a8-logical-topk-v2
+
+LABEL deepseek.capture_patch_id="${CAPTURE_PATCH_ID}" \
+      deepseek.capture_base_image="${BASE_IMAGE}" \
+      deepseek.capture_target="vllm-ascend-v0.22.1rc1-w8a8-dynamic"
+
+COPY apply_w8a8_route_capture.py /tmp/apply_w8a8_route_capture.py
+
+RUN python /tmp/apply_w8a8_route_capture.py \
+    && python /tmp/apply_w8a8_route_capture.py --verify \
+    && rm -f /tmp/apply_w8a8_route_capture.py

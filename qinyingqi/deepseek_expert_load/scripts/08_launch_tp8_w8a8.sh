@@ -50,7 +50,7 @@ VALIDATED_IDS="$(validate_npu_ids_for_count 8)"
 docker image inspect "${IMAGE_REF}" >/dev/null 2>&1 || \
     die "Docker image is absent: ${IMAGE_REF}"
 IMAGE_PATCH_ID="$(docker image inspect "${IMAGE_REF}" \
-    --format '{{if .Config.Labels}}{{index .Config.Labels "glm52.capture_patch_id"}}{{end}}')"
+    --format '{{if .Config.Labels}}{{index .Config.Labels "deepseek.capture_patch_id"}}{{end}}')"
 [[ "${IMAGE_PATCH_ID}" == "${CAPTURE_PATCH_ID}" ]] || \
     die "route-capture image label mismatch: expected ${CAPTURE_PATCH_ID}, got ${IMAGE_PATCH_ID:-<empty>}"
 if ss -H -ltn "sport = :${API_PORT}" | grep -q .; then
@@ -127,7 +127,7 @@ targets = [path for path in targets if path.is_file()]
 if len(targets) != 1:
     raise SystemExit(f"expected one installed w8a8_dynamic.py, got {targets}")
 marker_count = targets[0].read_text(encoding="utf-8").count(
-    "# GLM52_W8A8_ROUTE_CAPTURE_V1"
+    "# DEEPSEEK_V4_W8A8_ROUTE_CAPTURE_V2"
 )
 print(f"route_capture_marker_count={marker_count}")
 if marker_count != 1:
