@@ -150,14 +150,21 @@ def weight_summary(
     if zero_size:
         problems.append(f"zero-size safetensors files: {zero_size}")
 
-    index_path = model_path / "model.safetensors.index.json"
+    index_paths = sorted(model_path.glob("*.safetensors.index.json"))
+    index_path: Path | None = None
+    if len(index_paths) == 1:
+        index_path = index_paths[0]
+    elif len(index_paths) > 1:
+        names = [path.name for path in index_paths]
+        problems.append(f"multiple safetensors index files found: {names}")
+
     referenced_files: set[str] = set()
     tensor_count = 0
-    if index_path.is_file():
+    if index_path is not None:
         index = load_json(index_path)
         weight_map = index.get("weight_map")
         if not isinstance(weight_map, dict) or not weight_map:
-            problems.append("model.safetensors.index.json has no non-empty weight_map")
+            problems.append(f"{index_path.name} has no non-empty weight_map")
         else:
             tensor_count = len(weight_map)
             referenced_files = {
@@ -174,7 +181,11 @@ def weight_summary(
             if missing:
                 problems.append(f"index references missing shards: {missing}")
     elif len(shards) > 1:
-        problems.append("multiple safetensors shards found without model.safetensors.index.json")
+        warnings.append(
+            "multiple safetensors files found without a root "
+            "*.safetensors.index.json; vLLM can load top-level files by glob, "
+            "but the audit cannot prove a tensor-to-shard manifest"
+        )
 
     if referenced_files:
         active_files = referenced_files & set(shard_by_name)
@@ -185,8 +196,9 @@ def weight_summary(
     if unreferenced_files:
         warnings.append(
             f"{len(unreferenced_files)} safetensors shards are not referenced by "
-            "model.safetensors.index.json; vLLM filters them out, but do not delete "
-            "them until their provenance is known"
+            f"{index_path.name if index_path else 'an index'}; top-level duplicates "
+            "are filtered by vLLM and nested optional files are not globbed by its "
+            "default loader; do not delete them"
         )
 
     total_shard_bytes = sum(path.stat().st_size for path in shards)
@@ -202,7 +214,9 @@ def weight_summary(
             "shard_count": len(shards),
             "total_shard_bytes": total_shard_bytes,
             "total_shard_gib": round(total_shard_bytes / 1024**3, 3),
-            "index_present": index_path.is_file(),
+            "index_present": index_path is not None,
+            "index_name": index_path.name if index_path else None,
+            "index_candidates": [path.name for path in index_paths],
             "indexed_tensor_count": tensor_count,
             "referenced_shard_count": len(referenced_files),
             "active_shard_count": len(active_files),
@@ -215,6 +229,9 @@ def weight_summary(
                 3,
             ),
             "unreferenced_shards_first20": sorted(unreferenced_files)[:20],
+            "nested_shard_count": sum(
+                1 for path in shards if path.parent != model_path
+            ),
         },
         problems,
         warnings,
@@ -313,7 +330,7 @@ def main() -> int:
         )
 
     report = {
-        "schema_version": 3,
+        "schema_version": 4,
         "model_path": str(model_path),
         "topology": topology.to_dict(),
         "quantization": quantization,

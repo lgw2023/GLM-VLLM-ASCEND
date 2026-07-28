@@ -109,7 +109,24 @@ class AuditCliTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            (model / "model.safetensors").write_bytes(b"weights")
+            first = "quant_model_weights-00001-of-00002.safetensors"
+            second = "quant_model_weights-00002-of-00002.safetensors"
+            (model / first).write_bytes(b"weights-1")
+            (model / second).write_bytes(b"weights-2")
+            optional = model / "optional"
+            optional.mkdir()
+            (optional / "quarot.safetensors").write_bytes(b"optional")
+            (model / "quant_model_weights.safetensors.index.json").write_text(
+                json.dumps(
+                    {
+                        "weight_map": {
+                            "model.a": first,
+                            "model.b": second,
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
             result = run_python(
                 "00_audit_model.py",
                 "--model-path",
@@ -136,6 +153,16 @@ class AuditCliTests(unittest.TestCase):
                 "ascend",
             )
             self.assertTrue(report["hardware"]["soc_compatible"])
+            weights = report["weights"]
+            self.assertTrue(weights["index_present"])
+            self.assertEqual(
+                weights["index_name"],
+                "quant_model_weights.safetensors.index.json",
+            )
+            self.assertEqual(weights["active_shard_count"], 2)
+            self.assertEqual(weights["unreferenced_shard_count"], 1)
+            self.assertEqual(weights["nested_shard_count"], 1)
+            self.assertEqual(len(report["warnings"]), 1)
 
     def test_native_fp8_fp4_model_audit(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

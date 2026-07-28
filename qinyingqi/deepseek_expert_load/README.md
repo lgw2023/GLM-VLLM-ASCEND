@@ -115,7 +115,8 @@ findmnt -T "${MODEL_HOST_PATH}"
 findmnt -T "${BENCHMARK_DATA_ROOT}"
 findmnt -T "${RUN_STORAGE_ROOT}"
 test -r "${MODEL_HOST_PATH}/config.json" && echo MODEL_CONFIG_OK
-test -r "${MODEL_HOST_PATH}/model.safetensors.index.json" && echo MODEL_INDEX_OK
+test -r "${MODEL_HOST_PATH}/quant_model_weights.safetensors.index.json" && \
+  echo MODEL_INDEX_OK
 du -sh "${MODEL_HOST_PATH}"
 df -hT "${MODEL_HOST_PATH}" "${BENCHMARK_DATA_ROOT}" "${RUN_STORAGE_ROOT}"
 
@@ -160,7 +161,10 @@ bash scripts/00_audit_model.sh \
 "soc_compatible": true
 ```
 
-同时确认 `problems=[]`、索引没有 missing shard，并记录 `active_shard_gib`。
+同时确认 `problems=[]`、`index_name` 为
+`quant_model_weights.safetensors.index.json`、索引没有 missing shard，并记录
+`active_shard_gib`。官方 `optional/quarot.safetensors` 不在索引中，会作为 warning
+列出，但不影响兼容性，也不要删除它。
 
 ## 6. 启动 Node1 八卡服务
 
