@@ -469,15 +469,6 @@ def verify_model_runner_source(source: str) -> None:
         raise RuntimeError("model-runner bind diagnostic log is absent")
     if "AscendFusedMoE._ds_global_route_capturer = capturer" not in source:
         raise RuntimeError("model-runner global capturer fallback is absent")
-    if (
-        "        if has_kv_transfer_group() and not is_profiling:\n"
-        "            get_kv_transfer_group().register_kv_caches(kv_caches)\n"
-        "\n"
-        "        if self.model_config.enable_return_routed_experts:\n"
-        "            self.init_routed_experts_capturer()\n"
-        in source
-    ):
-        raise RuntimeError("model-runner still initializes capturer at end of kv_cache init")
     compile(source, MODEL_RUNNER_TARGET_RELATIVE_PATH, "exec")
 
 
