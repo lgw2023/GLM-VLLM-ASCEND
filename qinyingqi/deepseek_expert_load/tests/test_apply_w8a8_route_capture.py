@@ -76,13 +76,14 @@ class W8A8RouteCapturePatchTests(unittest.TestCase):
 
         self.assertEqual(w8a8.count(PATCHER.W8A8_PATCH_MARKER), 1)
         self.assertIn(
-            "capturer.capture(layer_id=layer.layer_id, topk_ids=topk_ids)",
+            "capturer.capture(layer_id=layer.layer_id, topk_ids=capture_ids)",
             w8a8,
         )
+        self.assertIn("prepare_finalize", w8a8)
+        self.assertIn("orig_tokens", w8a8)
+        self.assertIn("torch.tensor_split(gathered, tp_size, dim=0)", w8a8)
         self.assertEqual(capture.count(PATCHER.CAPTURE_PATCH_MARKER), 1)
-        self.assertIn("torch.tensor_split(", capture)
-        self.assertIn("hinted_tokens > n", capture)
-        self.assertIn("torch.distributed.all_gather", capture)
+        self.assertIn("already be full-length", capture)
         self.assertLess(
             capture.index(PATCHER.CAPTURE_PATCH_MARKER),
             capture.index("        self.device_buffer[:token_num_per_dp, layer_id, :] ="),

@@ -52,9 +52,9 @@ docker image inspect "${IMAGE_REF}" >/dev/null 2>&1 || \
 IMAGE_PATCH_ID="$(docker image inspect "${IMAGE_REF}" \
     --format '{{if .Config.Labels}}{{index .Config.Labels "deepseek.capture_patch_id"}}{{end}}')"
 case "${IMAGE_PATCH_ID}" in
-    deepseek-v4-w8a8-logical-topk-v4|deepseek-v4-w8a8-logical-topk-v5|deepseek-v4-w8a8-logical-topk-v6|deepseek-v4-w8a8-logical-topk-v7) ;;
+    deepseek-v4-w8a8-logical-topk-v4|deepseek-v4-w8a8-logical-topk-v5|deepseek-v4-w8a8-logical-topk-v6|deepseek-v4-w8a8-logical-topk-v7|deepseek-v4-w8a8-logical-topk-v8) ;;
     *)
-        die "route-capture image label unsupported: expected deepseek-v4-w8a8-logical-topk-v4|v5|v6|v7, got ${IMAGE_PATCH_ID:-<empty>}"
+        die "route-capture image label unsupported: expected deepseek-v4-w8a8-logical-topk-v4|v5|v6|v7|v8, got ${IMAGE_PATCH_ID:-<empty>}"
         ;;
 esac
 if [[ "${IMAGE_PATCH_ID}" != "${CAPTURE_PATCH_ID}" ]]; then
@@ -133,6 +133,9 @@ targets = [Path(root) / "quantization/methods/w8a8_dynamic.py" for root in roots
 targets = [path for path in targets if path.is_file()]
 if len(targets) != 1:
     raise SystemExit(f"expected one installed w8a8_dynamic.py, got {targets}")
+marker_count_v8 = targets[0].read_text(encoding="utf-8").count(
+    "# DEEPSEEK_V4_W8A8_ROUTE_CAPTURE_V8"
+)
 marker_count_v7 = targets[0].read_text(encoding="utf-8").count(
     "# DEEPSEEK_V4_W8A8_ROUTE_CAPTURE_V7"
 )
@@ -145,10 +148,15 @@ marker_count_v5 = targets[0].read_text(encoding="utf-8").count(
 marker_count_v4 = targets[0].read_text(encoding="utf-8").count(
     "# DEEPSEEK_V4_W8A8_ROUTE_CAPTURE_V4"
 )
-marker_count = marker_count_v7 + marker_count_v6 + marker_count_v5 + marker_count_v4
-print(f"route_capture_marker_count={marker_count} v7={marker_count_v7} v6={marker_count_v6} v5={marker_count_v5} v4={marker_count_v4}")
+marker_count = marker_count_v8 + marker_count_v7 + marker_count_v6 + marker_count_v5 + marker_count_v4
+print(f"route_capture_marker_count={marker_count} v8={marker_count_v8} v7={marker_count_v7} v6={marker_count_v6} v5={marker_count_v5} v4={marker_count_v4}")
 if marker_count != 1:
     raise SystemExit("W8A8 route-capture hook is absent or duplicated")
+if marker_count_v8 == 1 and (
+    "prepare_finalize" not in targets[0].read_text(encoding="utf-8")
+    or "orig_tokens" not in targets[0].read_text(encoding="utf-8")
+):
+    raise SystemExit("W8A8 v8 hook is missing prepare_finalize TP gather")
 vllm_spec = find_spec("vllm")
 vllm_roots = [] if vllm_spec is None or vllm_spec.submodule_search_locations is None else list(vllm_spec.submodule_search_locations)
 capture_targets = [Path(root) / "model_executor/layers/fused_moe/routed_experts_capturer.py" for root in vllm_roots]
@@ -156,15 +164,18 @@ capture_targets = [path for path in capture_targets if path.is_file()]
 if len(capture_targets) != 1:
     raise SystemExit(f"expected one active vLLM routed-experts capture source file, got {capture_targets}")
 capture_source = capture_targets[0].read_text(encoding="utf-8")
+capture_marker_count_v8 = capture_source.count("# DEEPSEEK_V4_VLLM_TP8_CAPTURE_GATHER_V8")
 capture_marker_count_v7 = capture_source.count("# DEEPSEEK_V4_VLLM_TP8_CAPTURE_GATHER_V7")
 capture_marker_count_v6 = capture_source.count("# DEEPSEEK_V4_VLLM_TP8_CAPTURE_GATHER_V6")
 capture_marker_count_v5 = capture_source.count("# DEEPSEEK_V4_VLLM_TP8_CAPTURE_GATHER_V5")
 capture_marker_count_v4 = capture_source.count("# DEEPSEEK_V4_VLLM_TP8_CAPTURE_GATHER_V4")
-capture_marker_count = capture_marker_count_v7 + capture_marker_count_v6 + capture_marker_count_v5 + capture_marker_count_v4
-print(f"tp8_capture_gather_marker_count={capture_marker_count} v7={capture_marker_count_v7} v6={capture_marker_count_v6} v5={capture_marker_count_v5} v4={capture_marker_count_v4}")
+capture_marker_count = capture_marker_count_v8 + capture_marker_count_v7 + capture_marker_count_v6 + capture_marker_count_v5 + capture_marker_count_v4
+print(f"tp8_capture_gather_marker_count={capture_marker_count} v8={capture_marker_count_v8} v7={capture_marker_count_v7} v6={capture_marker_count_v6} v5={capture_marker_count_v5} v4={capture_marker_count_v4}")
 if capture_marker_count != 1:
     raise SystemExit("TP8 capture-gather hook is absent or duplicated")
-if "torch.tensor_split(" not in capture_source and "get_tp_group().all_gather(" not in capture_source:
+if marker_count_v8 == 1 and "already be full-length" not in capture_source:
+    raise SystemExit("active v8 capturer missing W8A8 pre-gather contract note")
+if "torch.tensor_split(" not in capture_source and "get_tp_group().all_gather(" not in capture_source and marker_count_v8 == 0:
     raise SystemExit("active vLLM TP8 capture-gather hook does not call TP gather")
 ' "${EXPECTED_VLLM_PACKAGE_VERSION}" "${EXPECTED_VLLM_ASCEND_PACKAGE_VERSION}" \
     | tee "${RUN_DIR}/image-audit.txt"

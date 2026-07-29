@@ -6,8 +6,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib.sh"
 
 BASE_IMAGE_DEFAULT="quay.io/ascend/vllm-ascend:v0.22.1rc1"
-OUTPUT_IMAGE_DEFAULT="deepseek-v4-expert-capture:v0.22.1rc1-w8a8-v7"
-PATCH_ID_DEFAULT="deepseek-v4-w8a8-logical-topk-v7"
+OUTPUT_IMAGE_DEFAULT="deepseek-v4-expert-capture:v0.22.1rc1-w8a8-v8"
+PATCH_ID_DEFAULT="deepseek-v4-w8a8-logical-topk-v8"
 EXPECTED_VLLM_VERSION="0.22.1"
 EXPECTED_VLLM_ASCEND_VERSION="0.22.1rc1"
 
@@ -15,6 +15,7 @@ BASE_IMAGE="${BASE_IMAGE_DEFAULT}"
 OUTPUT_IMAGE="${OUTPUT_IMAGE_DEFAULT}"
 PATCH_ID="${PATCH_ID_DEFAULT}"
 PULL_BASE=0
+NO_CACHE=0
 
 usage() {
     cat <<'EOF'
@@ -27,6 +28,8 @@ use any NPU.
 
 Options:
   --confirm-pull-base       Pull the official base only when it is absent.
+  --no-cache                Force docker build --no-cache (recommended when
+                            iterating on apply_w8a8_route_capture.py).
   --base-image IMAGE        Override the base image.
   --output-image IMAGE      Derived image tag.
   --patch-id ID             Image capture-patch identifier.
@@ -38,6 +41,10 @@ while (($#)); do
     case "$1" in
         --confirm-pull-base)
             PULL_BASE=1
+            shift
+            ;;
+        --no-cache)
+            NO_CACHE=1
             shift
             ;;
         --base-image)
@@ -81,12 +88,16 @@ PATCH_FILE="${DEEPSEEK_EXPERIMENT_ROOT}/patches/apply_w8a8_route_capture.py"
 [[ -f "${DOCKERFILE}" ]] || die "capture Dockerfile is missing: ${DOCKERFILE}"
 [[ -f "${PATCH_FILE}" ]] || die "capture patch is missing: ${PATCH_FILE}"
 
-docker build \
-    --file "${DOCKERFILE}" \
-    --build-arg "BASE_IMAGE=${BASE_IMAGE}" \
-    --build-arg "CAPTURE_PATCH_ID=${PATCH_ID}" \
-    --tag "${OUTPUT_IMAGE}" \
-    "${DEEPSEEK_EXPERIMENT_ROOT}/patches"
+BUILD_ARGS=(
+    --file "${DOCKERFILE}"
+    --build-arg "BASE_IMAGE=${BASE_IMAGE}"
+    --build-arg "CAPTURE_PATCH_ID=${PATCH_ID}"
+    --tag "${OUTPUT_IMAGE}"
+)
+if ((NO_CACHE == 1)); then
+    BUILD_ARGS=(--no-cache "${BUILD_ARGS[@]}")
+fi
+docker build "${BUILD_ARGS[@]}" "${DEEPSEEK_EXPERIMENT_ROOT}/patches"
 
 ACTUAL_PATCH_ID="$(docker image inspect "${OUTPUT_IMAGE}" \
     --format '{{if .Config.Labels}}{{index .Config.Labels "deepseek.capture_patch_id"}}{{end}}')"
@@ -123,23 +134,25 @@ def one_source(import_name, relative):
 
 w8a8 = one_source("vllm_ascend", "quantization/methods/w8a8_dynamic.py")
 source = w8a8.read_text(encoding="utf-8")
-marker = "# DEEPSEEK_V4_W8A8_ROUTE_CAPTURE_V7"
+marker = "# DEEPSEEK_V4_W8A8_ROUTE_CAPTURE_V8"
 if source.count(marker) != 1:
     raise RuntimeError("DeepSeek W8A8 capture marker is absent or duplicated")
 if source.index(marker) > source.index("        if zero_expert_num > 0"):
     raise RuntimeError("capture marker is after logical-ID remapping")
-if "capturer.capture(layer_id=layer.layer_id, topk_ids=topk_ids)" not in source:
+if "capturer.capture(layer_id=layer.layer_id, topk_ids=capture_ids)" not in source:
     raise RuntimeError("Ascend routed-experts capturer call is absent")
+if "prepare_finalize" not in source or "orig_tokens" not in source:
+    raise RuntimeError("W8A8 TP gather via prepare_finalize is absent")
+if "torch.tensor_split(gathered, tp_size, dim=0)" not in source:
+    raise RuntimeError("W8A8 tensor_split all_gather is absent")
 
 capture = one_source("vllm", "model_executor/layers/fused_moe/routed_experts_capturer.py")
 capture_source = capture.read_text(encoding="utf-8")
-capture_marker = "# DEEPSEEK_V4_VLLM_TP8_CAPTURE_GATHER_V7"
+capture_marker = "# DEEPSEEK_V4_VLLM_TP8_CAPTURE_GATHER_V8"
 if capture_source.count(capture_marker) != 1:
     raise RuntimeError("DeepSeek vLLM TP8 capture-gather marker is absent or duplicated")
-if "torch.tensor_split(" not in capture_source:
-    raise RuntimeError("active vLLM TP8 routed-experts tensor_split gather is absent")
-if "hinted_tokens > n" not in capture_source:
-    raise RuntimeError("active vLLM TP8 gather missing local-hint rejection guard")
+if "already be full-length" not in capture_source:
+    raise RuntimeError("active capturer missing W8A8 pre-gather contract note")
 print("CAPTURE_PATCH_SOURCES_OK")')"
 [[ "${MARKER_COUNT}" == CAPTURE_PATCH_SOURCES_OK ]] || \
     die "derived image does not contain the required DeepSeek capture hooks"

@@ -318,7 +318,7 @@ def validate_routes(
                     f"prefill_dup={uniqueness['prefill']['duplicate_cell_fraction']:.4f}, "
                     f"decode_dup={uniqueness['decode']['duplicate_cell_fraction']:.4f}. "
                     "Prefill zeros/short tensors with clean decode usually mean "
-                    "Ascend All2All TP-split. Rebuild the v7 capture image, or "
+                    "Ascend All2All TP-split. Rebuild the v8 capture image, or "
                     "pass --unique-scope decode / --allow-duplicate-topk."
                 )
 

@@ -15,18 +15,62 @@ EXPECTED_VLLM_ASCEND_VERSION = "0.22.1rc1"
 W8A8_PACKAGE = "vllm_ascend"
 W8A8_TARGET_RELATIVE_PATH = "vllm_ascend/quantization/methods/w8a8_dynamic.py"
 W8A8_PACKAGE_RELATIVE_PATH = "quantization/methods/w8a8_dynamic.py"
-W8A8_PATCH_MARKER = "# DEEPSEEK_V4_W8A8_ROUTE_CAPTURE_V7"
+W8A8_PATCH_MARKER = "# DEEPSEEK_V4_W8A8_ROUTE_CAPTURE_V8"
 W8A8_ANCHOR = (
     "        assert topk_ids is not None\n"
     "        assert topk_weights is not None\n"
 )
+# Capture runs inside quant_method.apply(), which is after
+# PrepareAndFinalizeWithAll2All.prepare() has already tensor_split tokens
+# across TP. Reconstruct the full route tensor here (same pattern as
+# finalize), using prepare_finalize.num_tokens as the trim length. Do not
+# trust attn num_actual_tokens hints: they often equal the local shard.
 W8A8_CAPTURE_BLOCK = (
-    "        # DEEPSEEK_V4_W8A8_ROUTE_CAPTURE_V7\n"
+    "        # DEEPSEEK_V4_W8A8_ROUTE_CAPTURE_V8\n"
     "        # Ascend W8A8 does not call vLLM's router capture hook. Bind the\n"
     "        # capturer directly on the FusedMoE layer before any remapping.\n"
+    "        # All2All/MC2 prepare() already TP-split tokens, so gather first.\n"
     "        capturer = getattr(layer, \"_ascend_routed_experts_capturer\", None)\n"
     "        if capturer is not None:\n"
-    "            capturer.capture(layer_id=layer.layer_id, topk_ids=topk_ids)\n"
+    "            capture_ids = topk_ids\n"
+    "            moe = getattr(_EXTRA_CTX, \"moe_comm_method\", None)\n"
+    "            pf = getattr(moe, \"prepare_finalize\", None) if moe is not None else None\n"
+    "            tp_size = int(getattr(pf, \"tp_size\", 0) or 0)\n"
+    "            orig_tokens = int(getattr(pf, \"num_tokens\", 0) or 0)\n"
+    "            local_n = int(topk_ids.shape[0])\n"
+    "            if tp_size > 1 and orig_tokens > 0 and local_n != orig_tokens:\n"
+    "                import torch.distributed as dist\n"
+    "                from vllm.distributed.parallel_state import get_tp_group\n"
+    "\n"
+    "                local_size = torch.tensor(\n"
+    "                    [local_n], dtype=torch.int64, device=topk_ids.device\n"
+    "                )\n"
+    "                size_tensors = [\n"
+    "                    torch.empty(1, dtype=torch.int64, device=topk_ids.device)\n"
+    "                    for _ in range(tp_size)\n"
+    "                ]\n"
+    "                group = get_tp_group().device_group\n"
+    "                tp_group = getattr(getattr(moe, \"moe_config\", None), \"tp_group\", None)\n"
+    "                if tp_group is not None:\n"
+    "                    group = tp_group.device_group\n"
+    "                dist.all_gather(size_tensors, local_size, group=group)\n"
+    "                sizes = [int(value.item()) for value in size_tensors]\n"
+    "                padded_len = int(sum(sizes))\n"
+    "                gathered = torch.empty(\n"
+    "                    (padded_len, topk_ids.shape[1]),\n"
+    "                    dtype=topk_ids.dtype,\n"
+    "                    device=topk_ids.device,\n"
+    "                )\n"
+    "                split_views = torch.tensor_split(gathered, tp_size, dim=0)\n"
+    "                dist.all_gather(list(split_views), topk_ids, group=group)\n"
+    "                if orig_tokens > padded_len:\n"
+    "                    raise AssertionError(\n"
+    "                        \"W8A8 route capture: prepare_finalize.num_tokens=\"\n"
+    "                        f\"{orig_tokens} exceeds gathered padded_len=\"\n"
+    "                        f\"{padded_len} sizes={sizes}\"\n"
+    "                    )\n"
+    "                capture_ids = gathered[:orig_tokens]\n"
+    "            capturer.capture(layer_id=layer.layer_id, topk_ids=capture_ids)\n"
     "        else:\n"
     "            capture_fn = getattr(getattr(layer, \"router\", None), \"capture_fn\", None)\n"
     "            if capture_fn is not None:\n"
@@ -35,13 +79,14 @@ W8A8_CAPTURE_BLOCK = (
 )
 
 # vLLM-Ascend's worker patch is not imported when vLLM is exactly 0.22.1.
-# Patch the vLLM class that the release actually instantiates instead.
+# Keep a marker on the active capturer so image audit can prove the DP=1 path
+# expects W8A8 to pass already-reconstructed routes.
 CAPTURE_PACKAGE = "vllm"
 CAPTURE_TARGET_RELATIVE_PATH = (
     "vllm/model_executor/layers/fused_moe/routed_experts_capturer.py"
 )
 CAPTURE_PACKAGE_RELATIVE_PATH = "model_executor/layers/fused_moe/routed_experts_capturer.py"
-CAPTURE_PATCH_MARKER = "# DEEPSEEK_V4_VLLM_TP8_CAPTURE_GATHER_V7"
+CAPTURE_PATCH_MARKER = "# DEEPSEEK_V4_VLLM_TP8_CAPTURE_GATHER_V8"
 CAPTURE_ANCHOR = (
     "        ctx = get_forward_context()\n"
     "        if ctx.dp_metadata is None:  # single dp\n"
@@ -50,100 +95,15 @@ CAPTURE_ANCHOR = (
     "            token_num_per_dp = topk_ids.shape[0]\n"
     "        else:  # multi dp\n"
 )
-# Ascend PrepareAndFinalizeWithAll2All.prepare() tensor_splits tokens across TP
-# even when FLASHCOMM1/SP is disabled. Local topk_ids therefore cover only one
-# shard. Reconstruct with tensor_split-shaped all_gather (same as Ascend's
-# multi-DP All2All path). Critical: never treat a local-sized hint as the
-# full write length — that left buffer tails as zeros (v6 bug).
 CAPTURE_REPLACEMENT = (
     "        ctx = get_forward_context()\n"
-    "        # DEEPSEEK_V4_VLLM_TP8_CAPTURE_GATHER_V7\n"
-    "        if ctx.dp_metadata is None:  # single DP; Ascend may still TP-split\n"
-    "            n = int(topk_ids.shape[0])\n"
-    "            metadata = ctx.attn_metadata\n"
-    "            if isinstance(metadata, list):\n"
-    "                metadata = next((item for item in metadata if item), {})\n"
-    "            if isinstance(metadata, dict) and metadata:\n"
-    "                first_metadata = next(\n"
-    "                    (item for item in metadata.values() if item is not None),\n"
-    "                    None,\n"
-    "                )\n"
-    "            else:\n"
-    "                first_metadata = metadata\n"
-    "            actual_tokens = int(getattr(first_metadata, \"num_actual_tokens\", 0) or 0)\n"
-    "            fallback_tokens = int(getattr(ctx, \"num_tokens\", 0) or 0)\n"
-    "            hinted_tokens = actual_tokens or fallback_tokens\n"
-    "            if self.tp_size > 1:\n"
-    "                local_size = torch.tensor(\n"
-    "                    [n], dtype=torch.int64, device=topk_ids.device\n"
-    "                )\n"
-    "                size_tensors = [\n"
-    "                    torch.empty(1, dtype=torch.int64, device=topk_ids.device)\n"
-    "                    for _ in range(self.tp_size)\n"
-    "                ]\n"
-    "                torch.distributed.all_gather(\n"
-    "                    size_tensors,\n"
-    "                    local_size,\n"
-    "                    group=get_tp_group().device_group,\n"
-    "                )\n"
-    "                sizes = [int(value.item()) for value in size_tensors]\n"
-    "                gathered_tokens = int(sum(sizes))\n"
-    "                equal_sizes = min(sizes) == max(sizes)\n"
-    "                # Full routes already present on every rank: do not gather.\n"
-    "                replicated = bool(\n"
-    "                    hinted_tokens\n"
-    "                    and n == hinted_tokens\n"
-    "                    and equal_sizes\n"
-    "                    and sizes[0] == hinted_tokens\n"
-    "                )\n"
-    "                if replicated or gathered_tokens == n:\n"
-    "                    start_loc = 0\n"
-    "                    end_loc = n\n"
-    "                    token_num_per_dp = n\n"
-    "                else:\n"
-    "                    # Only trust hints strictly larger than the local shard.\n"
-    "                    # A hint equal to n is the local shard size (v6 failure).\n"
-    "                    if hinted_tokens > n and hinted_tokens <= gathered_tokens:\n"
-    "                        token_num_per_dp = hinted_tokens\n"
-    "                    elif (\n"
-    "                        gathered_tokens == self.tp_size\n"
-    "                        and equal_sizes\n"
-    "                        and sizes[0] == 1\n"
-    "                    ):\n"
-    "                        token_num_per_dp = 1\n"
-    "                    else:\n"
-    "                        token_num_per_dp = gathered_tokens\n"
-    "                    gather_rows = (\n"
-    "                        token_num_per_dp\n"
-    "                        if token_num_per_dp >= self.tp_size\n"
-    "                        else self.tp_size\n"
-    "                    )\n"
-    "                    gathered = torch.empty(\n"
-    "                        (gather_rows, topk_ids.shape[1]),\n"
-    "                        dtype=topk_ids.dtype,\n"
-    "                        device=topk_ids.device,\n"
-    "                    )\n"
-    "                    split_views = torch.tensor_split(\n"
-    "                        gathered, self.tp_size, dim=0\n"
-    "                    )\n"
-    "                    torch.distributed.all_gather(\n"
-    "                        list(split_views),\n"
-    "                        topk_ids,\n"
-    "                        group=get_tp_group().device_group,\n"
-    "                    )\n"
-    "                    topk_ids = gathered\n"
-    "                    start_loc = 0\n"
-    "                    end_loc = token_num_per_dp\n"
-    "                    if int(topk_ids.shape[0]) < end_loc:\n"
-    "                        raise AssertionError(\n"
-    "                            \"RoutedExpertsCapturer: reconstructed routes \"\n"
-    "                            f\"shorter than token_num_per_dp={token_num_per_dp}, \"\n"
-    "                            f\"got {int(topk_ids.shape[0])}\"\n"
-    "                        )\n"
-    "            else:\n"
-    "                start_loc = 0\n"
-    "                end_loc = n\n"
-    "                token_num_per_dp = n\n"
+    "        # DEEPSEEK_V4_VLLM_TP8_CAPTURE_GATHER_V8\n"
+    "        # DP=1 All2All TP-split reconstruction is done in W8A8 apply before\n"
+    "        # capturer.capture(); topk_ids here should already be full-length.\n"
+    "        if ctx.dp_metadata is None:  # single dp\n"
+    "            start_loc = 0\n"
+    "            end_loc = topk_ids.shape[0]\n"
+    "            token_num_per_dp = topk_ids.shape[0]\n"
     "        else:  # multi dp\n"
 )
 
@@ -234,11 +194,15 @@ def verify_w8a8_source(source: str) -> None:
     if source.count(W8A8_PATCH_MARKER) != 1:
         raise RuntimeError("DeepSeek W8A8 route-capture marker is missing or duplicated")
     marker_index = source.index(W8A8_PATCH_MARKER)
-    capture_index = source.index("capturer.capture(layer_id=layer.layer_id, topk_ids=topk_ids)")
+    capture_index = source.index("capturer.capture(layer_id=layer.layer_id, topk_ids=capture_ids)")
     zero_expert_index = source.index("        if zero_expert_num > 0")
     force_balance_index = source.index("        if enable_force_load_balance:")
     if not marker_index < capture_index < zero_expert_index < force_balance_index:
         raise RuntimeError("W8A8 capture hook is not before remapping/load balancing")
+    if "prepare_finalize" not in source or "orig_tokens" not in source:
+        raise RuntimeError("W8A8 capture hook missing prepare_finalize TP gather")
+    if "torch.tensor_split(gathered, tp_size, dim=0)" not in source:
+        raise RuntimeError("W8A8 capture hook missing tensor_split all_gather")
     compile(source, W8A8_TARGET_RELATIVE_PATH, "exec")
 
 
@@ -246,13 +210,12 @@ def verify_capture_source(source: str) -> None:
     if source.count(CAPTURE_PATCH_MARKER) != 1:
         raise RuntimeError("DeepSeek vLLM TP8 capture-gather marker is missing or duplicated")
     marker_index = source.index(CAPTURE_PATCH_MARKER)
-    gather_index = source.index("torch.tensor_split(")
     multi_dp_index = source.index("        else:  # multi dp")
     buffer_write_index = source.index("        self.device_buffer[:token_num_per_dp, layer_id, :]")
-    if not marker_index < gather_index < multi_dp_index < buffer_write_index:
-        raise RuntimeError("TP8 gather hook is not before the routed-experts buffer write")
-    if "hinted_tokens > n" not in source:
-        raise RuntimeError("TP8 gather hook missing local-hint rejection guard")
+    if not marker_index < multi_dp_index < buffer_write_index:
+        raise RuntimeError("TP8 gather marker is not before the routed-experts buffer write")
+    if "already be full-length" not in source:
+        raise RuntimeError("TP8 capturer marker missing W8A8 pre-gather contract note")
     compile(source, CAPTURE_TARGET_RELATIVE_PATH, "exec")
 
 
