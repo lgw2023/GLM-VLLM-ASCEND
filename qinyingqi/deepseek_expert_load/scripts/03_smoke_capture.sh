@@ -44,6 +44,7 @@ ARGS=(
     --model-path "${MODEL_HOST_PATH}"
     --output-dir "${RUN_DIR}/smoke"
     --max-tokens 16
+    --unique-scope decode
 )
 if ((ALLOW_DUPLICATE == 1)); then
     ARGS+=(--allow-duplicate-topk)

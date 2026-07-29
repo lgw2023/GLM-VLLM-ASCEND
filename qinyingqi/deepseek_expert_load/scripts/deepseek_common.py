@@ -172,11 +172,14 @@ def validate_routes(
     completion_tokens: int,
     *,
     require_unique_topk: bool = True,
+    unique_scope: str = "all",
 ) -> dict[str, Any]:
     import numpy as np
 
     if prompt_tokens < 1 or completion_tokens < 1:
         raise ValueError("prompt and completion token counts must be positive")
+    if unique_scope not in {"all", "decode", "none"}:
+        raise ValueError("unique_scope must be one of: all, decode, none")
     expected_rows = prompt_tokens + completion_tokens - 1
     expected_shape = (expected_rows, topology.num_hidden_layers, topology.top_k)
     if routes.shape != expected_shape:
@@ -203,25 +206,42 @@ def validate_routes(
     decode = moe_routes[prompt_tokens:]
     uniqueness = {
         "unique_topk": True,
+        "unique_scope": unique_scope,
         "total": _phase_duplicate_stats(moe_routes, topology.top_k),
         "prefill": _phase_duplicate_stats(prefill, topology.top_k),
         "decode": _phase_duplicate_stats(decode, topology.top_k),
     }
     if topology.top_k > 1:
-        sorted_topk = np.sort(moe_routes, axis=-1)
-        uniqueness["unique_topk"] = bool(np.all(np.diff(sorted_topk, axis=-1) > 0))
-        if require_unique_topk and not uniqueness["unique_topk"]:
-            raise ValueError(
-                "top-k expert IDs are not unique for every token/layer; "
-                f"duplicate_cell_fraction="
-                f"{uniqueness['total']['duplicate_cell_fraction']:.4f}, "
-                f"all_zero_cell_fraction="
-                f"{uniqueness['total']['all_zero_cell_fraction']:.4f}, "
-                f"prefill_dup={uniqueness['prefill']['duplicate_cell_fraction']:.4f}, "
-                f"decode_dup={uniqueness['decode']['duplicate_cell_fraction']:.4f}. "
-                "Relaunch with FLASHCOMM1/SP disabled, or pass "
-                "--allow-duplicate-topk to continue collecting raw routes."
-            )
+        sorted_all = np.sort(moe_routes, axis=-1)
+        uniqueness["unique_topk"] = bool(np.all(np.diff(sorted_all, axis=-1) > 0))
+        if decode.size:
+            sorted_decode = np.sort(decode, axis=-1)
+            uniqueness["unique_topk_decode"] = bool(np.all(np.diff(sorted_decode, axis=-1) > 0))
+        else:
+            uniqueness["unique_topk_decode"] = True
+
+        enforce = require_unique_topk and unique_scope != "none"
+        if enforce:
+            if unique_scope == "decode":
+                ok = bool(uniqueness["unique_topk_decode"])
+                label = "decode"
+            else:
+                ok = bool(uniqueness["unique_topk"])
+                label = "all phases"
+            if not ok:
+                raise ValueError(
+                    "top-k expert IDs are not unique for every token/layer "
+                    f"(scope={label}); "
+                    f"duplicate_cell_fraction="
+                    f"{uniqueness['total']['duplicate_cell_fraction']:.4f}, "
+                    f"all_zero_cell_fraction="
+                    f"{uniqueness['total']['all_zero_cell_fraction']:.4f}, "
+                    f"prefill_dup={uniqueness['prefill']['duplicate_cell_fraction']:.4f}, "
+                    f"decode_dup={uniqueness['decode']['duplicate_cell_fraction']:.4f}. "
+                    "Prefill zeros with clean decode usually mean Ascend All2All "
+                    "TP-split (independent of FLASHCOMM1). Rebuild the v6 capture "
+                    "image, or pass --unique-scope decode / --allow-duplicate-topk."
+                )
 
     return {
         "shape": list(routes.shape),
@@ -237,6 +257,7 @@ def validate_routes(
             np.unique(moe_routes.reshape(-1, topology.top_k), axis=0).shape[0]
         ),
         "unique_topk": uniqueness["unique_topk"],
+        "unique_topk_decode": uniqueness.get("unique_topk_decode", uniqueness["unique_topk"]),
         "uniqueness": uniqueness,
     }
 

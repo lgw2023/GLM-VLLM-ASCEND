@@ -65,6 +65,28 @@ class DeepSeekCommonTests(unittest.TestCase):
         self.assertFalse(summary["unique_topk"])
         self.assertGreater(summary["uniqueness"]["total"]["duplicate_cell_fraction"], 0.0)
 
+    def test_decode_scope_accepts_prefill_zeros(self) -> None:
+        routes = np.zeros((3, 6, 2), dtype=np.uint8)
+        for layer in self.topology.moe_layer_indices:
+            routes[2, layer] = [2, 3]
+        with self.assertRaisesRegex(ValueError, "not unique"):
+            validate_routes(
+                routes,
+                self.topology,
+                prompt_tokens=2,
+                completion_tokens=2,
+                unique_scope="all",
+            )
+        summary = validate_routes(
+            routes,
+            self.topology,
+            prompt_tokens=2,
+            completion_tokens=2,
+            unique_scope="decode",
+        )
+        self.assertFalse(summary["unique_topk"])
+        self.assertTrue(summary["unique_topk_decode"])
+
     def test_dense_layer_nonzero_is_rejected(self) -> None:
         routes = np.zeros((1, 6, 2), dtype=np.uint8)
         routes[0, 0] = [1, 2]

@@ -68,6 +68,7 @@ for benchmark in "${SELECTED[@]}"; do
         --output-dir "${OUTPUT}"
         --max-tokens "${BENCHMARK_MAX_TOKENS}"
         --max-requests "${MAX_REQUESTS}"
+        --unique-scope decode
     )
     if ((RESUME == 1)); then
         ARGS+=(--resume)

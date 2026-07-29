@@ -80,7 +80,8 @@ class W8A8RouteCapturePatchTests(unittest.TestCase):
             w8a8,
         )
         self.assertEqual(capture.count(PATCHER.CAPTURE_PATCH_MARKER), 1)
-        self.assertIn("get_tp_group().all_gather(topk_ids, dim=0)", capture)
+        self.assertIn("get_tp_group().all_gather(shard, dim=0)", capture)
+        self.assertIn("torch.distributed.all_gather", capture)
         self.assertLess(
             capture.index(PATCHER.CAPTURE_PATCH_MARKER),
             capture.index("        self.device_buffer[:token_num_per_dp, layer_id, :] ="),

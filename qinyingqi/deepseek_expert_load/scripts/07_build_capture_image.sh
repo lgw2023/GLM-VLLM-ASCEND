@@ -6,8 +6,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib.sh"
 
 BASE_IMAGE_DEFAULT="quay.io/ascend/vllm-ascend:v0.22.1rc1"
-OUTPUT_IMAGE_DEFAULT="deepseek-v4-expert-capture:v0.22.1rc1-w8a8-v5"
-PATCH_ID_DEFAULT="deepseek-v4-w8a8-logical-topk-v5"
+OUTPUT_IMAGE_DEFAULT="deepseek-v4-expert-capture:v0.22.1rc1-w8a8-v6"
+PATCH_ID_DEFAULT="deepseek-v4-w8a8-logical-topk-v6"
 EXPECTED_VLLM_VERSION="0.22.1"
 EXPECTED_VLLM_ASCEND_VERSION="0.22.1rc1"
 
@@ -123,7 +123,7 @@ def one_source(import_name, relative):
 
 w8a8 = one_source("vllm_ascend", "quantization/methods/w8a8_dynamic.py")
 source = w8a8.read_text(encoding="utf-8")
-marker = "# DEEPSEEK_V4_W8A8_ROUTE_CAPTURE_V5"
+marker = "# DEEPSEEK_V4_W8A8_ROUTE_CAPTURE_V6"
 if source.count(marker) != 1:
     raise RuntimeError("DeepSeek W8A8 capture marker is absent or duplicated")
 if source.index(marker) > source.index("        if zero_expert_num > 0"):
@@ -133,10 +133,10 @@ if "capturer.capture(layer_id=layer.layer_id, topk_ids=topk_ids)" not in source:
 
 capture = one_source("vllm", "model_executor/layers/fused_moe/routed_experts_capturer.py")
 capture_source = capture.read_text(encoding="utf-8")
-capture_marker = "# DEEPSEEK_V4_VLLM_TP8_CAPTURE_GATHER_V5"
+capture_marker = "# DEEPSEEK_V4_VLLM_TP8_CAPTURE_GATHER_V6"
 if capture_source.count(capture_marker) != 1:
     raise RuntimeError("DeepSeek vLLM TP8 capture-gather marker is absent or duplicated")
-if "get_tp_group().all_gather(topk_ids, dim=0)" not in capture_source:
+if "get_tp_group().all_gather(shard, dim=0)" not in capture_source:
     raise RuntimeError("active vLLM TP8 routed-experts all-gather call is absent")
 print("CAPTURE_PATCH_SOURCES_OK")')"
 [[ "${MARKER_COUNT}" == CAPTURE_PATCH_SOURCES_OK ]] || \

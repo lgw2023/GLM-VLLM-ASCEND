@@ -97,6 +97,7 @@ def extract_response(
     topology: ModelTopology,
     *,
     require_unique_topk: bool = True,
+    unique_scope: str = "all",
 ) -> tuple[np.ndarray, dict[str, Any]]:
     if response.get("model") != expected_model:
         raise ValueError(
@@ -127,6 +128,7 @@ def extract_response(
         prompt_tokens=len(prompt_ids),
         completion_tokens=len(completion_ids),
         require_unique_topk=require_unique_topk,
+        unique_scope=unique_scope,
     )
     if summary["covered_experts"] <= topology.top_k or summary["unique_route_tuples"] <= 1:
         raise ValueError("routes are constant or stale across the request")
@@ -202,6 +204,7 @@ def rebuild_aggregate(
     topology: ModelTopology,
     *,
     require_unique_topk: bool = True,
+    unique_scope: str = "all",
 ) -> tuple[np.ndarray, int, int]:
     counts = np.zeros((3, topology.num_moe_layers, topology.num_experts), dtype=np.int64)
     prompt_tokens = 0
@@ -221,6 +224,7 @@ def rebuild_aggregate(
             prompt,
             completion,
             require_unique_topk=require_unique_topk,
+            unique_scope=unique_scope,
         )
         counts += count_assignments(routes, topology, prompt)
         prompt_tokens += prompt
@@ -243,6 +247,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=1024)
     parser.add_argument("--timeout-seconds", type=int, default=1800)
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument(
+        "--unique-scope",
+        choices=("all", "decode", "none"),
+        default="decode",
+        help=(
+            "Which phases must have unique top-k IDs. Default decode: Ascend "
+            "All2All TP-split often leaves prefill zeros even with FLASHCOMM1=0."
+        ),
+    )
     parser.add_argument(
         "--allow-duplicate-topk",
         action="store_true",
@@ -307,6 +320,9 @@ def main() -> int:
         "topology": topology.to_dict(),
         "max_tokens": args.max_tokens,
         "seed": args.seed,
+        "unique_scope": (
+            "none" if args.allow_duplicate_topk else args.unique_scope
+        ),
         "allow_duplicate_topk": bool(args.allow_duplicate_topk),
     }
     if manifest_path.exists():
@@ -323,12 +339,14 @@ def main() -> int:
             encoding="utf-8",
         )
 
+    unique_scope = "none" if args.allow_duplicate_topk else args.unique_scope
     completed = load_completed(records_path)
     counts, total_prompt_tokens, total_completion_tokens = rebuild_aggregate(
         output_dir,
         completed,
         topology,
         require_unique_topk=not args.allow_duplicate_topk,
+        unique_scope=unique_scope,
     )
     endpoint = f"{args.base_url.rstrip('/')}/chat/completions"
     failures_path = output_dir / "failures.jsonl"
@@ -366,6 +384,7 @@ def main() -> int:
                 args.model,
                 topology,
                 require_unique_topk=not args.allow_duplicate_topk,
+                unique_scope=unique_scope,
             )
         except Exception as exc:
             append_jsonl(
@@ -431,6 +450,8 @@ def main() -> int:
                     "completion_tokens": completion_count,
                     "covered_experts": route_summary["covered_experts"],
                     "unique_topk": route_summary.get("unique_topk", True),
+                    "unique_topk_decode": route_summary.get("unique_topk_decode", True),
+                    "unique_scope": unique_scope,
                 },
                 sort_keys=True,
             ),
@@ -442,17 +463,28 @@ def main() -> int:
         "benchmark": benchmark,
         "request_count": len(completed),
         "imperfect_route_requests": imperfect_routes,
+        "unique_scope": unique_scope,
         "allow_duplicate_topk": bool(args.allow_duplicate_topk),
-        "routes_trusted_for_load_analysis": imperfect_routes == 0,
+        "routes_trusted_for_full_load_analysis": imperfect_routes == 0,
+        "routes_trusted_for_decode_load_analysis": all(
+            record.get("route_summary", {}).get("unique_topk_decode", True)
+            for record in completed.values()
+        ),
     }
     (output_dir / "route-quality.json").write_text(
         json.dumps(quality, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
-    status = "CAPTURE_OK" if imperfect_routes == 0 else "CAPTURE_OK_WITH_IMPERFECT_ROUTES"
+    if imperfect_routes == 0:
+        status = "CAPTURE_OK"
+    elif unique_scope == "decode" and quality["routes_trusted_for_decode_load_analysis"]:
+        status = "CAPTURE_OK_DECODE_TRUSTED"
+    else:
+        status = "CAPTURE_OK_WITH_IMPERFECT_ROUTES"
     print(
         f"{status} benchmark={benchmark} requests={len(completed)} "
-        f"imperfect_routes={imperfect_routes} output={output_dir}"
+        f"imperfect_routes={imperfect_routes} unique_scope={unique_scope} "
+        f"output={output_dir}"
     )
     return 0
 

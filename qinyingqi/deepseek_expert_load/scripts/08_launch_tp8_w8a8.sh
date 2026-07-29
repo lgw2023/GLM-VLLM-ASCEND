@@ -52,9 +52,9 @@ docker image inspect "${IMAGE_REF}" >/dev/null 2>&1 || \
 IMAGE_PATCH_ID="$(docker image inspect "${IMAGE_REF}" \
     --format '{{if .Config.Labels}}{{index .Config.Labels "deepseek.capture_patch_id"}}{{end}}')"
 case "${IMAGE_PATCH_ID}" in
-    deepseek-v4-w8a8-logical-topk-v4|deepseek-v4-w8a8-logical-topk-v5) ;;
+    deepseek-v4-w8a8-logical-topk-v4|deepseek-v4-w8a8-logical-topk-v5|deepseek-v4-w8a8-logical-topk-v6) ;;
     *)
-        die "route-capture image label unsupported: expected deepseek-v4-w8a8-logical-topk-v4|v5, got ${IMAGE_PATCH_ID:-<empty>}"
+        die "route-capture image label unsupported: expected deepseek-v4-w8a8-logical-topk-v4|v5|v6, got ${IMAGE_PATCH_ID:-<empty>}"
         ;;
 esac
 if [[ "${IMAGE_PATCH_ID}" != "${CAPTURE_PATCH_ID}" ]]; then
@@ -133,14 +133,17 @@ targets = [Path(root) / "quantization/methods/w8a8_dynamic.py" for root in roots
 targets = [path for path in targets if path.is_file()]
 if len(targets) != 1:
     raise SystemExit(f"expected one installed w8a8_dynamic.py, got {targets}")
+marker_count_v6 = targets[0].read_text(encoding="utf-8").count(
+    "# DEEPSEEK_V4_W8A8_ROUTE_CAPTURE_V6"
+)
 marker_count_v5 = targets[0].read_text(encoding="utf-8").count(
     "# DEEPSEEK_V4_W8A8_ROUTE_CAPTURE_V5"
 )
 marker_count_v4 = targets[0].read_text(encoding="utf-8").count(
     "# DEEPSEEK_V4_W8A8_ROUTE_CAPTURE_V4"
 )
-marker_count = marker_count_v5 + marker_count_v4
-print(f"route_capture_marker_count={marker_count} v5={marker_count_v5} v4={marker_count_v4}")
+marker_count = marker_count_v6 + marker_count_v5 + marker_count_v4
+print(f"route_capture_marker_count={marker_count} v6={marker_count_v6} v5={marker_count_v5} v4={marker_count_v4}")
 if marker_count != 1:
     raise SystemExit("W8A8 route-capture hook is absent or duplicated")
 vllm_spec = find_spec("vllm")
@@ -150,13 +153,14 @@ capture_targets = [path for path in capture_targets if path.is_file()]
 if len(capture_targets) != 1:
     raise SystemExit(f"expected one active vLLM routed-experts capture source file, got {capture_targets}")
 capture_source = capture_targets[0].read_text(encoding="utf-8")
+capture_marker_count_v6 = capture_source.count("# DEEPSEEK_V4_VLLM_TP8_CAPTURE_GATHER_V6")
 capture_marker_count_v5 = capture_source.count("# DEEPSEEK_V4_VLLM_TP8_CAPTURE_GATHER_V5")
 capture_marker_count_v4 = capture_source.count("# DEEPSEEK_V4_VLLM_TP8_CAPTURE_GATHER_V4")
-capture_marker_count = capture_marker_count_v5 + capture_marker_count_v4
-print(f"tp8_capture_gather_marker_count={capture_marker_count} v5={capture_marker_count_v5} v4={capture_marker_count_v4}")
+capture_marker_count = capture_marker_count_v6 + capture_marker_count_v5 + capture_marker_count_v4
+print(f"tp8_capture_gather_marker_count={capture_marker_count} v6={capture_marker_count_v6} v5={capture_marker_count_v5} v4={capture_marker_count_v4}")
 if capture_marker_count != 1:
     raise SystemExit("TP8 capture-gather hook is absent or duplicated")
-if "get_tp_group().all_gather(topk_ids, dim=0)" not in capture_source:
+if "get_tp_group().all_gather(" not in capture_source:
     raise SystemExit("active vLLM TP8 capture-gather hook does not call the TP all-gather")
 ' "${EXPECTED_VLLM_PACKAGE_VERSION}" "${EXPECTED_VLLM_ASCEND_PACKAGE_VERSION}" \
     | tee "${RUN_DIR}/image-audit.txt"

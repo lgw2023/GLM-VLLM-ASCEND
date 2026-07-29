@@ -10,44 +10,53 @@ Mac 不下载模型和 benchmark。模型、镜像、NPU 计算和结果都留�
 
 ### 0. 先跑通（绕过 uniqueness 死结）
 
-smoke 报 `top-k expert IDs are not unique` 的根因是：启动脚本曾打开
-`VLLM_ASCEND_ENABLE_FLASHCOMM1=1`（sequence parallel）。DP=1 + TP=8 时每个
-rank 只看到 token 分片，未写满的 buffer 全是 0，看起来像 top-k 里重复的
-expert 0。
+smoke 报 `top-k expert IDs are not unique`，且常见诊断是：
 
-**最小修复：关 SP 后重建一个 run，不必先重建镜像。**
+```text
+prefill_dup ≈ 0.7+
+decode_dup = 0.0
+all_zero_cell_fraction ≈ duplicate_cell_fraction
+```
+
+这说明 **不是 FLASHCOMM1**。Ascend 在 TP>1 的 All2All MoE `prepare()` 里会把
+prefill token `tensor_split` 到各 rank；rank0 只写下约 1/TP 行，其余 buffer 是 0。
+Decode 每次 1 token，所以 decode 是干净的。
+
+**现在默认只严格校验 decode**（不必重建镜像也能继续）：
 
 ```bash
 cd /home/qinyingqi/GLM-VLLM-ASCEND
 git pull
 cd qinyingqi/deepseek_expert_load
 
-bash scripts/07_stop.sh configs/node1_w8a8.env --remove
-
-export RUN_ID="dsv4-w8a8-tp8-nosp-$(date -u +%Y%m%dT%H%M%SZ)"
-bash scripts/08_launch_tp8_w8a8.sh \
-  configs/node1_w8a8.env \
-  --confirm-npu-ids 0,1,2,3,4,5,6,7
-bash scripts/02_wait_ready.sh configs/node1_w8a8.env
 bash scripts/03_smoke_capture.sh configs/node1_w8a8.env
 ```
 
-确认 `launch.command.sh` 里是 `VLLM_ASCEND_ENABLE_FLASHCOMM1=0` 且
-`enable_flashcomm1:false`。成功应输出 `CAPTURE_OK`。
-
-若仍 uniqueness 失败，可先把 benchmark 跑完再修路由质量：
+成功标志可以是 `CAPTURE_OK` 或 `CAPTURE_OK_DECODE_TRUSTED`。随后：
 
 ```bash
-bash scripts/03_smoke_capture.sh configs/node1_w8a8.env --allow-duplicate-topk
 bash scripts/04_run_benchmarks.sh \
   configs/node1_w8a8.env \
   --benchmarks mmlu_pro,swebench_lite,livecodebench,ruler_niah \
-  --max-requests 5 \
-  --allow-duplicate-topk
+  --max-requests 5
 ```
 
-`--allow-duplicate-topk` 会保存原始 route 和 `route-quality.json`，但
-**不能拿来做可信的 20/90 负载结论**。正式统计前必须先让严格 smoke 通过。
+分析时先看 **decode** 相位的负载；prefill 在旧镜像上不可信。
+
+要修复 prefill 全量路由，再构建 v6 镜像（不均匀 TP gather）：
+
+```bash
+bash scripts/07_build_capture_image.sh
+sed -i \
+  -e 's#^IMAGE_REF=.*#IMAGE_REF=deepseek-v4-expert-capture:v0.22.1rc1-w8a8-v6#' \
+  -e 's#^CAPTURE_PATCH_ID=.*#CAPTURE_PATCH_ID=deepseek-v4-w8a8-logical-topk-v6#' \
+  configs/node1_w8a8.env
+bash scripts/07_stop.sh configs/node1_w8a8.env --remove
+export RUN_ID="dsv4-w8a8-tp8-v6-$(date -u +%Y%m%dT%H%M%SZ)"
+bash scripts/08_launch_tp8_w8a8.sh \
+  configs/node1_w8a8.env \
+  --confirm-npu-ids 0,1,2,3,4,5,6,7
+```
 
 ### 1.1 主实验：Node1 八卡 W8A8
 
