@@ -15,13 +15,13 @@ EXPECTED_VLLM_ASCEND_VERSION = "0.22.1rc1"
 W8A8_PACKAGE = "vllm_ascend"
 W8A8_TARGET_RELATIVE_PATH = "vllm_ascend/quantization/methods/w8a8_dynamic.py"
 W8A8_PACKAGE_RELATIVE_PATH = "quantization/methods/w8a8_dynamic.py"
-W8A8_PATCH_MARKER = "# DEEPSEEK_V4_W8A8_ROUTE_CAPTURE_V6"
+W8A8_PATCH_MARKER = "# DEEPSEEK_V4_W8A8_ROUTE_CAPTURE_V7"
 W8A8_ANCHOR = (
     "        assert topk_ids is not None\n"
     "        assert topk_weights is not None\n"
 )
 W8A8_CAPTURE_BLOCK = (
-    "        # DEEPSEEK_V4_W8A8_ROUTE_CAPTURE_V6\n"
+    "        # DEEPSEEK_V4_W8A8_ROUTE_CAPTURE_V7\n"
     "        # Ascend W8A8 does not call vLLM's router capture hook. Bind the\n"
     "        # capturer directly on the FusedMoE layer before any remapping.\n"
     "        capturer = getattr(layer, \"_ascend_routed_experts_capturer\", None)\n"
@@ -41,7 +41,7 @@ CAPTURE_TARGET_RELATIVE_PATH = (
     "vllm/model_executor/layers/fused_moe/routed_experts_capturer.py"
 )
 CAPTURE_PACKAGE_RELATIVE_PATH = "model_executor/layers/fused_moe/routed_experts_capturer.py"
-CAPTURE_PATCH_MARKER = "# DEEPSEEK_V4_VLLM_TP8_CAPTURE_GATHER_V6"
+CAPTURE_PATCH_MARKER = "# DEEPSEEK_V4_VLLM_TP8_CAPTURE_GATHER_V7"
 CAPTURE_ANCHOR = (
     "        ctx = get_forward_context()\n"
     "        if ctx.dp_metadata is None:  # single dp\n"
@@ -52,10 +52,12 @@ CAPTURE_ANCHOR = (
 )
 # Ascend PrepareAndFinalizeWithAll2All.prepare() tensor_splits tokens across TP
 # even when FLASHCOMM1/SP is disabled. Local topk_ids therefore cover only one
-# shard; reconstruct with an uneven-safe gather, then trim pad rows.
+# shard. Reconstruct with tensor_split-shaped all_gather (same as Ascend's
+# multi-DP All2All path). Critical: never treat a local-sized hint as the
+# full write length — that left buffer tails as zeros (v6 bug).
 CAPTURE_REPLACEMENT = (
     "        ctx = get_forward_context()\n"
-    "        # DEEPSEEK_V4_VLLM_TP8_CAPTURE_GATHER_V6\n"
+    "        # DEEPSEEK_V4_VLLM_TP8_CAPTURE_GATHER_V7\n"
     "        if ctx.dp_metadata is None:  # single DP; Ascend may still TP-split\n"
     "            n = int(topk_ids.shape[0])\n"
     "            metadata = ctx.attn_metadata\n"
@@ -86,38 +88,58 @@ CAPTURE_REPLACEMENT = (
     "                )\n"
     "                sizes = [int(value.item()) for value in size_tensors]\n"
     "                gathered_tokens = int(sum(sizes))\n"
-    "                if hinted_tokens and hinted_tokens <= gathered_tokens:\n"
-    "                    token_num_per_dp = hinted_tokens\n"
-    "                elif (\n"
-    "                    gathered_tokens == self.tp_size\n"
-    "                    and min(sizes) == max(sizes) == 1\n"
-    "                ):\n"
-    "                    # N < TP pad-to-TP path without a reliable hint: keep one\n"
-    "                    # real row (typical single-token decode).\n"
-    "                    token_num_per_dp = 1\n"
+    "                equal_sizes = min(sizes) == max(sizes)\n"
+    "                # Full routes already present on every rank: do not gather.\n"
+    "                replicated = bool(\n"
+    "                    hinted_tokens\n"
+    "                    and n == hinted_tokens\n"
+    "                    and equal_sizes\n"
+    "                    and sizes[0] == hinted_tokens\n"
+    "                )\n"
+    "                if replicated or gathered_tokens == n:\n"
+    "                    start_loc = 0\n"
+    "                    end_loc = n\n"
+    "                    token_num_per_dp = n\n"
     "                else:\n"
-    "                    token_num_per_dp = gathered_tokens\n"
-    "                if gathered_tokens != n:\n"
-    "                    max_n = max(sizes)\n"
-    "                    if n < max_n:\n"
-    "                        pad = topk_ids.new_zeros((max_n - n, topk_ids.shape[1]))\n"
-    "                        shard = torch.cat([topk_ids, pad], dim=0)\n"
+    "                    # Only trust hints strictly larger than the local shard.\n"
+    "                    # A hint equal to n is the local shard size (v6 failure).\n"
+    "                    if hinted_tokens > n and hinted_tokens <= gathered_tokens:\n"
+    "                        token_num_per_dp = hinted_tokens\n"
+    "                    elif (\n"
+    "                        gathered_tokens == self.tp_size\n"
+    "                        and equal_sizes\n"
+    "                        and sizes[0] == 1\n"
+    "                    ):\n"
+    "                        token_num_per_dp = 1\n"
     "                    else:\n"
-    "                        shard = topk_ids\n"
-    "                    gathered = get_tp_group().all_gather(shard, dim=0)\n"
-    "                    pieces = []\n"
-    "                    for rank, size in enumerate(sizes):\n"
-    "                        begin = rank * max_n\n"
-    "                        pieces.append(gathered[begin : begin + size])\n"
-    "                    topk_ids = torch.cat(pieces, dim=0)\n"
-    "                start_loc = 0\n"
-    "                end_loc = token_num_per_dp\n"
-    "                if int(topk_ids.shape[0]) < end_loc:\n"
-    "                    raise AssertionError(\n"
-    "                        \"RoutedExpertsCapturer: reconstructed routes shorter \"\n"
-    "                        f\"than token_num_per_dp={token_num_per_dp}, got \"\n"
-    "                        f\"{int(topk_ids.shape[0])}\"\n"
+    "                        token_num_per_dp = gathered_tokens\n"
+    "                    gather_rows = (\n"
+    "                        token_num_per_dp\n"
+    "                        if token_num_per_dp >= self.tp_size\n"
+    "                        else self.tp_size\n"
     "                    )\n"
+    "                    gathered = torch.empty(\n"
+    "                        (gather_rows, topk_ids.shape[1]),\n"
+    "                        dtype=topk_ids.dtype,\n"
+    "                        device=topk_ids.device,\n"
+    "                    )\n"
+    "                    split_views = torch.tensor_split(\n"
+    "                        gathered, self.tp_size, dim=0\n"
+    "                    )\n"
+    "                    torch.distributed.all_gather(\n"
+    "                        list(split_views),\n"
+    "                        topk_ids,\n"
+    "                        group=get_tp_group().device_group,\n"
+    "                    )\n"
+    "                    topk_ids = gathered\n"
+    "                    start_loc = 0\n"
+    "                    end_loc = token_num_per_dp\n"
+    "                    if int(topk_ids.shape[0]) < end_loc:\n"
+    "                        raise AssertionError(\n"
+    "                            \"RoutedExpertsCapturer: reconstructed routes \"\n"
+    "                            f\"shorter than token_num_per_dp={token_num_per_dp}, \"\n"
+    "                            f\"got {int(topk_ids.shape[0])}\"\n"
+    "                        )\n"
     "            else:\n"
     "                start_loc = 0\n"
     "                end_loc = n\n"
@@ -224,11 +246,13 @@ def verify_capture_source(source: str) -> None:
     if source.count(CAPTURE_PATCH_MARKER) != 1:
         raise RuntimeError("DeepSeek vLLM TP8 capture-gather marker is missing or duplicated")
     marker_index = source.index(CAPTURE_PATCH_MARKER)
-    gather_index = source.index("get_tp_group().all_gather(shard, dim=0)")
+    gather_index = source.index("torch.tensor_split(")
     multi_dp_index = source.index("        else:  # multi dp")
     buffer_write_index = source.index("        self.device_buffer[:token_num_per_dp, layer_id, :]")
     if not marker_index < gather_index < multi_dp_index < buffer_write_index:
         raise RuntimeError("TP8 gather hook is not before the routed-experts buffer write")
+    if "hinted_tokens > n" not in source:
+        raise RuntimeError("TP8 gather hook missing local-hint rejection guard")
     compile(source, CAPTURE_TARGET_RELATIVE_PATH, "exec")
 
 
