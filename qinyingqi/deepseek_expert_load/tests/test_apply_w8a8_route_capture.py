@@ -41,6 +41,21 @@ def original_fused_moe_source() -> str:
 def original_model_runner_source() -> str:
     return (
         "class NPUModelRunner:\n"
+        "    def load_model(self):\n"
+        "        if self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:\n"
+        "            self._start_dump_data()\n"
+        "\n"
+        "    def _start_dump_data(self) -> None:\n"
+        "        pass\n"
+        "\n"
+        "    def initialize_kv_cache(self):\n"
+        "        kv_caches = {}\n"
+        "        if has_kv_transfer_group() and not is_profiling:\n"
+        "            get_kv_transfer_group().register_kv_caches(kv_caches)\n"
+        "        if self.model_config.enable_return_routed_experts:\n"
+        "            self.init_routed_experts_capturer()\n"
+        "        return kv_caches\n"
+        "\n"
         + PATCHER.MODEL_RUNNER_BIND_ANCHOR
         + "    def _align_memory(self, tensor, alignment):\n"
         + "        return tensor\n"
@@ -124,8 +139,10 @@ class W8A8RouteCapturePatchTests(unittest.TestCase):
         self.assertIn("model.modules()", model_runner)
 
         self.assertEqual(capture.count(PATCHER.CAPTURE_PATCH_MARKER), 1)
-        self.assertIn("pre-prepare capture", capture)
+        self.assertIn("Pre-prepare capture", capture)
         self.assertIn("DEEPSEEK_ROUTE_CAPTURE_DIAG capturer_write", capture)
+        self.assertIn("capturer_gather", capture)
+        self.assertIn("dist.all_gather", capture)
 
     def test_patches_reject_already_patched_source(self) -> None:
         w8a8 = PATCHER.patch_w8a8_source(original_w8a8_source())

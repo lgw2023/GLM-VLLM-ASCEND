@@ -165,6 +165,8 @@ if "pre-prepare capture" not in capture_source:
     raise RuntimeError("active capturer missing pre-prepare contract note")
 if "DEEPSEEK_ROUTE_CAPTURE_DIAG capturer_write" not in capture_source:
     raise RuntimeError("capturer temporary buffer-write diag log is absent")
+if "dist.all_gather" not in capture_source:
+    raise RuntimeError("capturer TP gather logic is absent")
 
 runner = one_source("vllm_ascend", "worker/model_runner_v1.py")
 runner_source = runner.read_text(encoding="utf-8")
