@@ -67,7 +67,7 @@ bash scripts/08_launch_tp8_w8a8.sh \
 硬件：8 x Ascend 910B1 64 GiB
 并行：DP=1, TP=8, EP=on
 量化：ModelSlim W8A8, --quantization ascend
-镜像：deepseek-v4-expert-capture:v0.22.1rc1-w8a8-v4
+镜像：deepseek-v4-expert-capture:v0.22.1rc1-w8a8-v6（prefill 全量；旧跑可用 v4）
 API：http://127.0.0.1:7100/v1
 结果：/data/disk2/deepseek-expert-load-w8a8/runs
 ```
@@ -82,8 +82,9 @@ prefix caching、EPLB、动态负载均衡，以及 **FLASHCOMM1 / sequence para
 否则 SP 分片会把 padding 零值混进 logical Expert ID，导致 top-k 不唯一。
 派生镜像在 vLLM-Ascend 通用 `W8A8_DYNAMIC` MoE 执行方法中，调用 Ascend 的
 `FusedMoE` routed-expert capturer 来保存 logical Expert ID，并直接修补 vLLM 0.22.1
-实际使用的 `RoutedExpertsCapturer`；v5 仅在确认是 SP shard 时才做 TP gather。
-启动脚本会核验 Docker label（接受 v4 或 v5）和对应源码 marker。
+实际使用的 `RoutedExpertsCapturer`。v6 对 Ascend All2All 的不均匀 TP-split
+做 uneven-safe gather，重建完整 prefill；v5 仅在确认 SP shard 时 gather。
+启动脚本会核验 Docker label（接受 v4 / v5 / v6）和对应源码 marker。
 
 ### 1.2 不再在 A2 上启动原生 FP8+MXFP4 目录
 
@@ -141,8 +142,8 @@ grep -E '^(IMAGE_REF|CAPTURE_PATCH_ID|MODEL_HOST_PATH|BENCHMARK_DATA_ROOT|RUN_RO
 应为：
 
 ```text
-IMAGE_REF=deepseek-v4-expert-capture:v0.22.1rc1-w8a8-v4
-CAPTURE_PATCH_ID=deepseek-v4-w8a8-logical-topk-v4
+IMAGE_REF=deepseek-v4-expert-capture:v0.22.1rc1-w8a8-v6
+CAPTURE_PATCH_ID=deepseek-v4-w8a8-logical-topk-v6
 MODEL_HOST_PATH=/data/node0_disk1/Public/DeepSeek-V4-Flash-w8a8-mtp
 BENCHMARK_DATA_ROOT=/data/node0_disk2/glm52-study/runs/benchmark-data
 RUN_ROOT=/data/disk2/deepseek-expert-load-w8a8/runs
@@ -151,7 +152,8 @@ TARGET_SOC=ASCEND910B1
 REQUIRED_EXPERT_QUANTIZATION=w8a8
 ```
 
-已有 v4 镜像可继续用；重建时再切到 v5 tag。启动脚本接受 v4/v5 label。
+已有 v4/v5 镜像可继续用（prefill 不可信）；要修 prefill 请切到 v6。
+启动脚本接受 v4/v5/v6 label。
 
 `MODEL_HOST_PATH` 和 `BENCHMARK_DATA_ROOT` 在 Node1 是 Node0 磁盘的网络挂载；
 结果写入 Node1 本地 `/data/disk2`。
@@ -194,9 +196,9 @@ done
 使用；以管理员分配、`npu-smi info` 中的进程/显存状态和 keep-alive 状态为准。
 不要停止或删除其他人的容器。
 
-### 4.1 构建 DeepSeek v4 route-capture 镜像
+### 4.1 构建 DeepSeek v6 route-capture 镜像
 
-首次运行，或此前配置仍然指向任意 v1/v2/v3 image 时，在 Node1 执行：
+首次运行，或此前配置仍然指向任意 v1–v5 image 时，在 Node1 执行：
 
 ```bash
 bash scripts/07_build_capture_image.sh
@@ -206,12 +208,12 @@ bash scripts/07_build_capture_image.sh
 模型或 benchmark，也不占用 NPU。若基础镜像确实不存在，才在网络正常时显式加
 `--confirm-pull-base`。
 
-已有的 `configs/node1_w8a8.env` 不会被 `git pull` 覆盖，因此迁移到 v4 时必须执行：
+已有的 `configs/node1_w8a8.env` 不会被 `git pull` 覆盖，因此迁移到 v6 时必须执行：
 
 ```bash
 sed -i \
-  -e 's#^IMAGE_REF=.*#IMAGE_REF=deepseek-v4-expert-capture:v0.22.1rc1-w8a8-v4#' \
-  -e 's#^CAPTURE_PATCH_ID=.*#CAPTURE_PATCH_ID=deepseek-v4-w8a8-logical-topk-v4#' \
+  -e 's#^IMAGE_REF=.*#IMAGE_REF=deepseek-v4-expert-capture:v0.22.1rc1-w8a8-v6#' \
+  -e 's#^CAPTURE_PATCH_ID=.*#CAPTURE_PATCH_ID=deepseek-v4-w8a8-logical-topk-v6#' \
   configs/node1_w8a8.env
 
 source configs/node1_w8a8.env
@@ -475,14 +477,15 @@ grep -E 'FLASHCOMM1|enable_flashcomm1' "${RUN_ROOT}/${RUN_ID}/launch.command.sh"
 run，不要继续 benchmark。
 
 仍失败时，看 smoke 输出里的 `duplicate_cell_fraction` /
-`all_zero_cell_fraction`。高全零比例通常仍是 SP 分片或 capturer 未写入。
-临时可加 `--allow-duplicate-topk` 先跑通请求；正式负载分析前再构建 v5 镜像：
+`all_zero_cell_fraction`。高全零比例通常是 Ascend All2All TP-split，rank0 只
+写下约 1/TP 行。临时可加 `--unique-scope decode` 先跑通；正式修 prefill 请构建
+v6 镜像：
 
 ```bash
 bash scripts/07_build_capture_image.sh
 sed -i \
-  -e 's#^IMAGE_REF=.*#IMAGE_REF=deepseek-v4-expert-capture:v0.22.1rc1-w8a8-v5#' \
-  -e 's#^CAPTURE_PATCH_ID=.*#CAPTURE_PATCH_ID=deepseek-v4-w8a8-logical-topk-v5#' \
+  -e 's#^IMAGE_REF=.*#IMAGE_REF=deepseek-v4-expert-capture:v0.22.1rc1-w8a8-v6#' \
+  -e 's#^CAPTURE_PATCH_ID=.*#CAPTURE_PATCH_ID=deepseek-v4-w8a8-logical-topk-v6#' \
   configs/node1_w8a8.env
 ```
 
@@ -497,6 +500,7 @@ sed -i \
 - v3：改了不会被 vLLM 0.22.1 导入的 worker patch 文件
 - v4：改真正的 `RoutedExpertsCapturer`，但 DP=1 gather 条件过宽
 - v5：仅在确认 SP shard（ceil-div）时 gather；主路径仍应关 FLASHCOMM1
+- v6：对 Ascend All2All 不均匀 TP-split 做 uneven-safe gather，重建完整 prefill
 
 ## 14. 本地与远端测试
 

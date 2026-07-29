@@ -8,14 +8,19 @@ source "${SCRIPT_DIR}/lib.sh"
 CONFIG_PATH="${1:-}"
 shift || true
 ALLOW_DUPLICATE=0
+UNIQUE_SCOPE="decode"
 while (($#)); do
     case "$1" in
         --allow-duplicate-topk)
             ALLOW_DUPLICATE=1
             shift
             ;;
+        --unique-scope)
+            UNIQUE_SCOPE="${2:-}"
+            shift 2
+            ;;
         -h|--help)
-            printf 'Usage: bash scripts/03_smoke_capture.sh CONFIG [--allow-duplicate-topk]\n'
+            printf 'Usage: bash scripts/03_smoke_capture.sh CONFIG [--unique-scope decode|all|none] [--allow-duplicate-topk]\n'
             exit 0
             ;;
         *)
@@ -23,6 +28,13 @@ while (($#)); do
             ;;
     esac
 done
+
+case "${UNIQUE_SCOPE}" in
+    all|decode|none) ;;
+    *)
+        die "unique-scope must be one of: all, decode, none"
+        ;;
+esac
 
 load_config "${CONFIG_PATH}"
 for name in RUN_ROOT API_HOST API_PORT SERVED_MODEL_NAME MODEL_HOST_PATH; do
@@ -44,7 +56,7 @@ ARGS=(
     --model-path "${MODEL_HOST_PATH}"
     --output-dir "${RUN_DIR}/smoke"
     --max-tokens 16
-    --unique-scope decode
+    --unique-scope "${UNIQUE_SCOPE}"
 )
 if ((ALLOW_DUPLICATE == 1)); then
     ARGS+=(--allow-duplicate-topk)
