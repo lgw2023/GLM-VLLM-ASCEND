@@ -26,6 +26,18 @@ def original_w8a8_source() -> str:
     )
 
 
+def original_fused_moe_source() -> str:
+    return (
+        "from vllm.forward_context import get_forward_context\n"
+        "from vllm_ascend.flash_common3_context import get_flash_common3_context\n"
+        "from vllm_ascend.ops.fused_moe.experts_selector import select_experts\n"
+        "class AscendFusedMoE:\n"
+        "    def forward_impl(self):\n"
+        + PATCHER.FUSED_MOE_ANCHOR
+        + "        return prepare_output\n"
+    )
+
+
 def original_capture_source() -> str:
     return (
         "class Capturer:\n"
@@ -42,10 +54,13 @@ class W8A8RouteCapturePatchTests(unittest.TestCase):
             ascend_root = Path(directory) / "vllm_ascend"
             vllm_root = Path(directory) / "vllm"
             w8a8_target = ascend_root / PATCHER.W8A8_PACKAGE_RELATIVE_PATH
+            fused_target = ascend_root / PATCHER.FUSED_MOE_PACKAGE_RELATIVE_PATH
             capture_target = vllm_root / PATCHER.CAPTURE_PACKAGE_RELATIVE_PATH
             w8a8_target.parent.mkdir(parents=True)
+            fused_target.parent.mkdir(parents=True)
             capture_target.parent.mkdir(parents=True)
             w8a8_target.write_text("# installed W8A8 source\n", encoding="utf-8")
+            fused_target.write_text("# installed fused_moe source\n", encoding="utf-8")
             capture_target.write_text("# installed capture source\n", encoding="utf-8")
 
             def fake_find_spec(name: str):
@@ -58,6 +73,10 @@ class W8A8RouteCapturePatchTests(unittest.TestCase):
                     w8a8_target,
                 )
                 self.assertEqual(
+                    PATCHER.target_path(PATCHER.FUSED_MOE_PACKAGE, PATCHER.FUSED_MOE_PACKAGE_RELATIVE_PATH),
+                    fused_target,
+                )
+                self.assertEqual(
                     PATCHER.target_path(PATCHER.CAPTURE_PACKAGE, PATCHER.CAPTURE_PACKAGE_RELATIVE_PATH),
                     capture_target,
                 )
@@ -68,38 +87,44 @@ class W8A8RouteCapturePatchTests(unittest.TestCase):
         self.assertFalse(PATCHER.matches_release("0.22.2", "0.22.1"))
         self.assertFalse(PATCHER.matches_release("0.22.1rc1", "0.22.1"))
 
-    def test_patches_active_vllm_capture_before_buffer_write(self) -> None:
+    def test_patches_capture_before_prepare_and_skips_w8a8_post_split(self) -> None:
         w8a8 = PATCHER.patch_w8a8_source(original_w8a8_source())
+        fused = PATCHER.patch_fused_moe_source(original_fused_moe_source())
         capture = PATCHER.patch_capture_source(original_capture_source())
         PATCHER.verify_w8a8_source(w8a8)
+        PATCHER.verify_fused_moe_source(fused)
         PATCHER.verify_capture_source(capture)
 
         self.assertEqual(w8a8.count(PATCHER.W8A8_PATCH_MARKER), 1)
-        self.assertIn(
-            "capturer.capture(layer_id=layer.layer_id, topk_ids=capture_ids)",
-            w8a8,
-        )
-        self.assertIn("prepare_finalize", w8a8)
-        self.assertIn("orig_tokens", w8a8)
-        self.assertIn("torch.tensor_split(gathered, tp_size, dim=0)", w8a8)
-        self.assertEqual(capture.count(PATCHER.CAPTURE_PATCH_MARKER), 1)
-        self.assertIn("already be full-length", capture)
+        self.assertIn("Skipping post-split capture", w8a8)
+        self.assertNotIn("capturer.capture(layer_id=layer.layer_id, topk_ids=", w8a8)
+
+        self.assertEqual(fused.count(PATCHER.FUSED_MOE_PATCH_MARKER), 1)
+        self.assertIn("_route_capturer.capture(", fused)
         self.assertLess(
-            capture.index(PATCHER.CAPTURE_PATCH_MARKER),
-            capture.index("        self.device_buffer[:token_num_per_dp, layer_id, :] ="),
+            fused.index(PATCHER.FUSED_MOE_PATCH_MARKER),
+            fused.index("prepare_output = _EXTRA_CTX.moe_comm_method.prepare("),
         )
+
+        self.assertEqual(capture.count(PATCHER.CAPTURE_PATCH_MARKER), 1)
+        self.assertIn("pre-prepare capture", capture)
 
     def test_patches_reject_already_patched_source(self) -> None:
         w8a8 = PATCHER.patch_w8a8_source(original_w8a8_source())
+        fused = PATCHER.patch_fused_moe_source(original_fused_moe_source())
         capture = PATCHER.patch_capture_source(original_capture_source())
         with self.assertRaisesRegex(RuntimeError, "already present"):
             PATCHER.patch_w8a8_source(w8a8)
+        with self.assertRaisesRegex(RuntimeError, "already present"):
+            PATCHER.patch_fused_moe_source(fused)
         with self.assertRaisesRegex(RuntimeError, "already present"):
             PATCHER.patch_capture_source(capture)
 
     def test_patches_reject_unexpected_source_layout(self) -> None:
         with self.assertRaisesRegex(RuntimeError, "anchor"):
             PATCHER.patch_w8a8_source("def apply():\n    pass\n")
+        with self.assertRaisesRegex(RuntimeError, "unexpected"):
+            PATCHER.patch_fused_moe_source("def forward():\n    pass\n")
         with self.assertRaisesRegex(RuntimeError, "unexpected"):
             PATCHER.patch_capture_source("def capture():\n    pass\n")
 

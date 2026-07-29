@@ -6,8 +6,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib.sh"
 
 BASE_IMAGE_DEFAULT="quay.io/ascend/vllm-ascend:v0.22.1rc1"
-OUTPUT_IMAGE_DEFAULT="deepseek-v4-expert-capture:v0.22.1rc1-w8a8-v8"
-PATCH_ID_DEFAULT="deepseek-v4-w8a8-logical-topk-v8"
+OUTPUT_IMAGE_DEFAULT="deepseek-v4-expert-capture:v0.22.1rc1-w8a8-v9"
+PATCH_ID_DEFAULT="deepseek-v4-w8a8-logical-topk-v9"
 EXPECTED_VLLM_VERSION="0.22.1"
 EXPECTED_VLLM_ASCEND_VERSION="0.22.1rc1"
 
@@ -134,25 +134,33 @@ def one_source(import_name, relative):
 
 w8a8 = one_source("vllm_ascend", "quantization/methods/w8a8_dynamic.py")
 source = w8a8.read_text(encoding="utf-8")
-marker = "# DEEPSEEK_V4_W8A8_ROUTE_CAPTURE_V8"
+marker = "# DEEPSEEK_V4_W8A8_ROUTE_CAPTURE_V9"
 if source.count(marker) != 1:
     raise RuntimeError("DeepSeek W8A8 capture marker is absent or duplicated")
-if source.index(marker) > source.index("        if zero_expert_num > 0"):
-    raise RuntimeError("capture marker is after logical-ID remapping")
-if "capturer.capture(layer_id=layer.layer_id, topk_ids=capture_ids)" not in source:
-    raise RuntimeError("Ascend routed-experts capturer call is absent")
-if "prepare_finalize" not in source or "orig_tokens" not in source:
-    raise RuntimeError("W8A8 TP gather via prepare_finalize is absent")
-if "torch.tensor_split(gathered, tp_size, dim=0)" not in source:
-    raise RuntimeError("W8A8 tensor_split all_gather is absent")
+if "Skipping post-split capture" not in source:
+    raise RuntimeError("W8A8 v9 skip-post-split note is absent")
+if "capturer.capture(layer_id=layer.layer_id, topk_ids=" in source:
+    raise RuntimeError("W8A8 still captures post-split topk_ids")
+
+fused = one_source("vllm_ascend", "ops/fused_moe/fused_moe.py")
+fused_source = fused.read_text(encoding="utf-8")
+fused_marker = "# DEEPSEEK_V4_FUSED_MOE_CAPTURE_BEFORE_PREPARE_V9"
+if fused_source.count(fused_marker) != 1:
+    raise RuntimeError("DeepSeek fused-moe pre-prepare capture marker is absent or duplicated")
+if fused_source.index(fused_marker) > fused_source.index(
+    "        prepare_output = _EXTRA_CTX.moe_comm_method.prepare("
+):
+    raise RuntimeError("fused-moe capture marker is after prepare()")
+if "_route_capturer.capture(" not in fused_source:
+    raise RuntimeError("fused-moe pre-prepare capturer call is absent")
 
 capture = one_source("vllm", "model_executor/layers/fused_moe/routed_experts_capturer.py")
 capture_source = capture.read_text(encoding="utf-8")
-capture_marker = "# DEEPSEEK_V4_VLLM_TP8_CAPTURE_GATHER_V8"
+capture_marker = "# DEEPSEEK_V4_VLLM_TP8_CAPTURE_GATHER_V9"
 if capture_source.count(capture_marker) != 1:
     raise RuntimeError("DeepSeek vLLM TP8 capture-gather marker is absent or duplicated")
-if "already be full-length" not in capture_source:
-    raise RuntimeError("active capturer missing W8A8 pre-gather contract note")
+if "pre-prepare capture" not in capture_source:
+    raise RuntimeError("active capturer missing pre-prepare contract note")
 print("CAPTURE_PATCH_SOURCES_OK")')"
 [[ "${MARKER_COUNT}" == CAPTURE_PATCH_SOURCES_OK ]] || \
     die "derived image does not contain the required DeepSeek capture hooks"

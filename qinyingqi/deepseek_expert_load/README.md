@@ -43,16 +43,16 @@ bash scripts/04_run_benchmarks.sh \
 
 分析时先看 **decode** 相位的负载；prefill 在旧镜像上不可信。
 
-要修复 prefill 全量路由，再构建 v8 镜像（在 W8A8 apply 内按 prepare_finalize 还原）：
+要修复 prefill 全量路由，再构建 v9 镜像（在 prepare() 之前用完整 router 采集）：
 
 ```bash
 bash scripts/07_build_capture_image.sh --no-cache
 sed -i \
-  -e 's#^IMAGE_REF=.*#IMAGE_REF=deepseek-v4-expert-capture:v0.22.1rc1-w8a8-v8#' \
-  -e 's#^CAPTURE_PATCH_ID=.*#CAPTURE_PATCH_ID=deepseek-v4-w8a8-logical-topk-v8#' \
+  -e 's#^IMAGE_REF=.*#IMAGE_REF=deepseek-v4-expert-capture:v0.22.1rc1-w8a8-v9#' \
+  -e 's#^CAPTURE_PATCH_ID=.*#CAPTURE_PATCH_ID=deepseek-v4-w8a8-logical-topk-v9#' \
   configs/node1_w8a8.env
 bash scripts/07_stop.sh configs/node1_w8a8.env --remove
-export RUN_ID="dsv4-w8a8-tp8-v8-$(date -u +%Y%m%dT%H%M%SZ)"
+export RUN_ID="dsv4-w8a8-tp8-v9-$(date -u +%Y%m%dT%H%M%SZ)"
 bash scripts/08_launch_tp8_w8a8.sh \
   configs/node1_w8a8.env \
   --confirm-npu-ids 0,1,2,3,4,5,6,7
@@ -67,7 +67,7 @@ bash scripts/08_launch_tp8_w8a8.sh \
 硬件：8 x Ascend 910B1 64 GiB
 并行：DP=1, TP=8, EP=on
 量化：ModelSlim W8A8, --quantization ascend
-镜像：deepseek-v4-expert-capture:v0.22.1rc1-w8a8-v8（prefill 全量；旧跑可用 v4）
+镜像：deepseek-v4-expert-capture:v0.22.1rc1-w8a8-v9（prefill 全量；旧跑可用 v4）
 API：http://127.0.0.1:7100/v1
 结果：/data/disk2/deepseek-expert-load-w8a8/runs
 ```
@@ -80,12 +80,10 @@ Atlas 800 A2、8 x 64 GiB 部署 W8A8：
 本实验使用官方资源拓扑，但为 Expert 路由基线关闭 MTP、async scheduling、
 prefix caching、EPLB、动态负载均衡，以及 **FLASHCOMM1 / sequence parallel**；
 否则 SP 分片会把 padding 零值混进 logical Expert ID，导致 top-k 不唯一。
-派生镜像在 vLLM-Ascend 通用 `W8A8_DYNAMIC` MoE 执行方法中，调用 Ascend 的
-`FusedMoE` routed-expert capturer 来保存 logical Expert ID，并直接修补 vLLM 0.22.1
-实际使用的 `RoutedExpertsCapturer`。v8 在 W8A8 `apply` 内、用
-`prepare_finalize.num_tokens` 做与 finalize 同款的 `tensor_split` gather（v6/v7
-在 capturer 里猜 attn hint，仍会只写 1/TP 行）。
-启动脚本会核验 Docker label（接受 v4–v8）和对应源码 marker。
+派生镜像在 `AscendFusedMoE.forward` 的 `prepare()` **之前**用完整 router
+logits 采集 logical Expert ID（v6–v8 在 TP-split 之后采集/gather，prefill
+仍会大面积为零）。
+启动脚本会核验 Docker label（接受 v4–v9）和对应源码 marker。
 
 ### 1.2 不再在 A2 上启动原生 FP8+MXFP4 目录
 

@@ -15,78 +15,80 @@ EXPECTED_VLLM_ASCEND_VERSION = "0.22.1rc1"
 W8A8_PACKAGE = "vllm_ascend"
 W8A8_TARGET_RELATIVE_PATH = "vllm_ascend/quantization/methods/w8a8_dynamic.py"
 W8A8_PACKAGE_RELATIVE_PATH = "quantization/methods/w8a8_dynamic.py"
-W8A8_PATCH_MARKER = "# DEEPSEEK_V4_W8A8_ROUTE_CAPTURE_V8"
+W8A8_PATCH_MARKER = "# DEEPSEEK_V4_W8A8_ROUTE_CAPTURE_V9"
 W8A8_ANCHOR = (
     "        assert topk_ids is not None\n"
     "        assert topk_weights is not None\n"
 )
-# Capture runs inside quant_method.apply(), which is after
-# PrepareAndFinalizeWithAll2All.prepare() has already tensor_split tokens
-# across TP. Reconstruct the full route tensor here (same pattern as
-# finalize), using prepare_finalize.num_tokens as the trim length. Do not
-# trust attn num_actual_tokens hints: they often equal the local shard.
+# Do NOT capture the post-prepare local shard here. v6-v8 gathered or
+# captured inside apply() after All2All tensor_split; that left most
+# prefill rows as zeros. Capture now happens in AscendFusedMoE.forward
+# before prepare().
 W8A8_CAPTURE_BLOCK = (
-    "        # DEEPSEEK_V4_W8A8_ROUTE_CAPTURE_V8\n"
-    "        # Ascend W8A8 does not call vLLM's router capture hook. Bind the\n"
-    "        # capturer directly on the FusedMoE layer before any remapping.\n"
-    "        # All2All/MC2 prepare() already TP-split tokens, so gather first.\n"
-    "        capturer = getattr(layer, \"_ascend_routed_experts_capturer\", None)\n"
-    "        if capturer is not None:\n"
-    "            capture_ids = topk_ids\n"
-    "            moe = getattr(_EXTRA_CTX, \"moe_comm_method\", None)\n"
-    "            pf = getattr(moe, \"prepare_finalize\", None) if moe is not None else None\n"
-    "            tp_size = int(getattr(pf, \"tp_size\", 0) or 0)\n"
-    "            orig_tokens = int(getattr(pf, \"num_tokens\", 0) or 0)\n"
-    "            local_n = int(topk_ids.shape[0])\n"
-    "            if tp_size > 1 and orig_tokens > 0 and local_n != orig_tokens:\n"
-    "                import torch.distributed as dist\n"
-    "                from vllm.distributed.parallel_state import get_tp_group\n"
-    "\n"
-    "                local_size = torch.tensor(\n"
-    "                    [local_n], dtype=torch.int64, device=topk_ids.device\n"
+    "        # DEEPSEEK_V4_W8A8_ROUTE_CAPTURE_V9\n"
+    "        # Capture is done in AscendFusedMoE.forward before prepare()\n"
+    "        # (full router logits). Skipping post-split capture here avoids\n"
+    "        # overwriting the capturer buffer with a TP-local shard.\n"
+)
+
+FUSED_MOE_PACKAGE = "vllm_ascend"
+FUSED_MOE_TARGET_RELATIVE_PATH = "vllm_ascend/ops/fused_moe/fused_moe.py"
+FUSED_MOE_PACKAGE_RELATIVE_PATH = "ops/fused_moe/fused_moe.py"
+FUSED_MOE_PATCH_MARKER = "# DEEPSEEK_V4_FUSED_MOE_CAPTURE_BEFORE_PREPARE_V9"
+FUSED_MOE_ANCHOR = (
+    "        prepare_output = _EXTRA_CTX.moe_comm_method.prepare(\n"
+    "            hidden_states=hidden_states,\n"
+    "            router_logits=router_logits,\n"
+    "            replace_allreduce=_EXTRA_CTX.flash_comm_v1_enabled,\n"
+    "            enable_shared_expert_dp=self.enable_shared_expert_dp,\n"
+    "            quant_type=self.quant_type,\n"
+    "        )\n"
+)
+FUSED_MOE_CAPTURE_BLOCK = (
+    "        # DEEPSEEK_V4_FUSED_MOE_CAPTURE_BEFORE_PREPARE_V9\n"
+    "        # All2All/MC2 prepare() tensor_splits tokens across TP. Capture\n"
+    "        # logical routes on the full batch before that split.\n"
+    "        _route_capturer = getattr(self, \"_ascend_routed_experts_capturer\", None)\n"
+    "        if (\n"
+    "            _route_capturer is not None\n"
+    "            and self.vllm_config.model_config is not None\n"
+    "            and self.vllm_config.model_config.enable_return_routed_experts\n"
+    "        ):\n"
+    "            _capture_ids = None\n"
+    "            if self.multistream_overlap_gate:\n"
+    "                _fc3 = get_flash_common3_context()\n"
+    "                if _fc3 is not None and getattr(_fc3, \"topk_ids\", None) is not None:\n"
+    "                    _capture_ids = _fc3.topk_ids\n"
+    "            if _capture_ids is None:\n"
+    "                _capture_weights, _capture_ids = select_experts(\n"
+    "                    hidden_states=hidden_states,\n"
+    "                    router_logits=router_logits,\n"
+    "                    top_k=self.top_k,\n"
+    "                    use_grouped_topk=self.use_grouped_topk,\n"
+    "                    renormalize=self.renormalize,\n"
+    "                    topk_group=self.topk_group,\n"
+    "                    num_expert_group=self.num_expert_group,\n"
+    "                    custom_routing_function=self.custom_routing_function,\n"
+    "                    scoring_func=self.scoring_func,\n"
+    "                    routed_scaling_factor=self._original_routed_scaling_factor,\n"
+    "                    e_score_correction_bias=self.e_score_correction_bias,\n"
+    "                    num_experts=self.moe_config.num_experts,\n"
+    "                    input_ids=getattr(get_forward_context(), \"input_ids\", None),\n"
+    "                    tid2eid=self.tid2eid,\n"
     "                )\n"
-    "                size_tensors = [\n"
-    "                    torch.empty(1, dtype=torch.int64, device=topk_ids.device)\n"
-    "                    for _ in range(tp_size)\n"
-    "                ]\n"
-    "                group = get_tp_group().device_group\n"
-    "                tp_group = getattr(getattr(moe, \"moe_config\", None), \"tp_group\", None)\n"
-    "                if tp_group is not None:\n"
-    "                    group = tp_group.device_group\n"
-    "                dist.all_gather(size_tensors, local_size, group=group)\n"
-    "                sizes = [int(value.item()) for value in size_tensors]\n"
-    "                padded_len = int(sum(sizes))\n"
-    "                gathered = torch.empty(\n"
-    "                    (padded_len, topk_ids.shape[1]),\n"
-    "                    dtype=topk_ids.dtype,\n"
-    "                    device=topk_ids.device,\n"
-    "                )\n"
-    "                split_views = torch.tensor_split(gathered, tp_size, dim=0)\n"
-    "                dist.all_gather(list(split_views), topk_ids, group=group)\n"
-    "                if orig_tokens > padded_len:\n"
-    "                    raise AssertionError(\n"
-    "                        \"W8A8 route capture: prepare_finalize.num_tokens=\"\n"
-    "                        f\"{orig_tokens} exceeds gathered padded_len=\"\n"
-    "                        f\"{padded_len} sizes={sizes}\"\n"
-    "                    )\n"
-    "                capture_ids = gathered[:orig_tokens]\n"
-    "            capturer.capture(layer_id=layer.layer_id, topk_ids=capture_ids)\n"
-    "        else:\n"
-    "            capture_fn = getattr(getattr(layer, \"router\", None), \"capture_fn\", None)\n"
-    "            if capture_fn is not None:\n"
-    "                capture_fn(topk_ids)\n"
+    "            _route_capturer.capture(\n"
+    "                layer_id=self.layer_id, topk_ids=_capture_ids\n"
+    "            )\n"
     "\n"
 )
 
 # vLLM-Ascend's worker patch is not imported when vLLM is exactly 0.22.1.
-# Keep a marker on the active capturer so image audit can prove the DP=1 path
-# expects W8A8 to pass already-reconstructed routes.
 CAPTURE_PACKAGE = "vllm"
 CAPTURE_TARGET_RELATIVE_PATH = (
     "vllm/model_executor/layers/fused_moe/routed_experts_capturer.py"
 )
 CAPTURE_PACKAGE_RELATIVE_PATH = "model_executor/layers/fused_moe/routed_experts_capturer.py"
-CAPTURE_PATCH_MARKER = "# DEEPSEEK_V4_VLLM_TP8_CAPTURE_GATHER_V8"
+CAPTURE_PATCH_MARKER = "# DEEPSEEK_V4_VLLM_TP8_CAPTURE_GATHER_V9"
 CAPTURE_ANCHOR = (
     "        ctx = get_forward_context()\n"
     "        if ctx.dp_metadata is None:  # single dp\n"
@@ -97,9 +99,8 @@ CAPTURE_ANCHOR = (
 )
 CAPTURE_REPLACEMENT = (
     "        ctx = get_forward_context()\n"
-    "        # DEEPSEEK_V4_VLLM_TP8_CAPTURE_GATHER_V8\n"
-    "        # DP=1 All2All TP-split reconstruction is done in W8A8 apply before\n"
-    "        # capturer.capture(); topk_ids here should already be full-length.\n"
+    "        # DEEPSEEK_V4_VLLM_TP8_CAPTURE_GATHER_V9\n"
+    "        # Expect full-length topk_ids from AscendFusedMoE pre-prepare capture.\n"
     "        if ctx.dp_metadata is None:  # single dp\n"
     "            start_loc = 0\n"
     "            end_loc = topk_ids.shape[0]\n"
@@ -141,7 +142,7 @@ def package_source_path(
 
 
 def target_path(package: str, package_relative_path: str) -> Path:
-    if package == W8A8_PACKAGE:
+    if package in {W8A8_PACKAGE, FUSED_MOE_PACKAGE}:
         return package_source_path(
             "vllm_ascend",
             "vllm_ascend",
@@ -180,6 +181,23 @@ def patch_w8a8_source(source: str) -> str:
     return patched
 
 
+def patch_fused_moe_source(source: str) -> str:
+    if FUSED_MOE_PATCH_MARKER in source:
+        raise RuntimeError("DeepSeek fused-moe pre-prepare capture patch is already present")
+    if source.count(FUSED_MOE_ANCHOR) != 1:
+        raise RuntimeError("unexpected fused_moe source layout; prepare anchor is not unique")
+    # Ensure helpers used by the injected block are imported.
+    if "get_flash_common3_context" not in source:
+        raise RuntimeError("fused_moe.py is missing get_flash_common3_context import")
+    if "from vllm.forward_context import get_forward_context" not in source and (
+        "get_forward_context" not in source
+    ):
+        raise RuntimeError("fused_moe.py is missing get_forward_context")
+    patched = source.replace(FUSED_MOE_ANCHOR, FUSED_MOE_CAPTURE_BLOCK + FUSED_MOE_ANCHOR, 1)
+    compile(patched, FUSED_MOE_TARGET_RELATIVE_PATH, "exec")
+    return patched
+
+
 def patch_capture_source(source: str) -> str:
     if CAPTURE_PATCH_MARKER in source:
         raise RuntimeError("DeepSeek vLLM TP8 capture-gather patch is already present")
@@ -193,17 +211,25 @@ def patch_capture_source(source: str) -> str:
 def verify_w8a8_source(source: str) -> None:
     if source.count(W8A8_PATCH_MARKER) != 1:
         raise RuntimeError("DeepSeek W8A8 route-capture marker is missing or duplicated")
-    marker_index = source.index(W8A8_PATCH_MARKER)
-    capture_index = source.index("capturer.capture(layer_id=layer.layer_id, topk_ids=capture_ids)")
-    zero_expert_index = source.index("        if zero_expert_num > 0")
-    force_balance_index = source.index("        if enable_force_load_balance:")
-    if not marker_index < capture_index < zero_expert_index < force_balance_index:
-        raise RuntimeError("W8A8 capture hook is not before remapping/load balancing")
-    if "prepare_finalize" not in source or "orig_tokens" not in source:
-        raise RuntimeError("W8A8 capture hook missing prepare_finalize TP gather")
-    if "torch.tensor_split(gathered, tp_size, dim=0)" not in source:
-        raise RuntimeError("W8A8 capture hook missing tensor_split all_gather")
+    if "Skipping post-split capture" not in source:
+        raise RuntimeError("W8A8 v9 skip-post-split capture note is absent")
+    # Must not call capturer with post-split topk_ids anymore.
+    if "capturer.capture(layer_id=layer.layer_id, topk_ids=" in source:
+        raise RuntimeError("W8A8 still captures post-split topk_ids")
     compile(source, W8A8_TARGET_RELATIVE_PATH, "exec")
+
+
+def verify_fused_moe_source(source: str) -> None:
+    if source.count(FUSED_MOE_PATCH_MARKER) != 1:
+        raise RuntimeError("DeepSeek fused-moe pre-prepare marker is missing or duplicated")
+    marker_index = source.index(FUSED_MOE_PATCH_MARKER)
+    prepare_index = source.index(
+        "        prepare_output = _EXTRA_CTX.moe_comm_method.prepare("
+    )
+    capture_index = source.index("_route_capturer.capture(")
+    if not marker_index < capture_index < prepare_index:
+        raise RuntimeError("fused-moe capture is not before prepare()")
+    compile(source, FUSED_MOE_TARGET_RELATIVE_PATH, "exec")
 
 
 def verify_capture_source(source: str) -> None:
@@ -214,8 +240,8 @@ def verify_capture_source(source: str) -> None:
     buffer_write_index = source.index("        self.device_buffer[:token_num_per_dp, layer_id, :]")
     if not marker_index < multi_dp_index < buffer_write_index:
         raise RuntimeError("TP8 gather marker is not before the routed-experts buffer write")
-    if "already be full-length" not in source:
-        raise RuntimeError("TP8 capturer marker missing W8A8 pre-gather contract note")
+    if "pre-prepare capture" not in source:
+        raise RuntimeError("TP8 capturer marker missing pre-prepare contract note")
     compile(source, CAPTURE_TARGET_RELATIVE_PATH, "exec")
 
 
@@ -233,20 +259,26 @@ def main() -> int:
     args = parse_args()
     assert_package_versions()
     w8a8_path = target_path(W8A8_PACKAGE, W8A8_PACKAGE_RELATIVE_PATH)
+    fused_moe_path = target_path(FUSED_MOE_PACKAGE, FUSED_MOE_PACKAGE_RELATIVE_PATH)
     capture_path = target_path(CAPTURE_PACKAGE, CAPTURE_PACKAGE_RELATIVE_PATH)
     w8a8_source = w8a8_path.read_text(encoding="utf-8")
+    fused_moe_source = fused_moe_path.read_text(encoding="utf-8")
     capture_source = capture_path.read_text(encoding="utf-8")
 
     if args.verify:
         verify_w8a8_source(w8a8_source)
+        verify_fused_moe_source(fused_moe_source)
         verify_capture_source(capture_source)
         print(f"DEEPSEEK_W8A8_ROUTE_CAPTURE_PATCH_OK path={w8a8_path}")
+        print(f"DEEPSEEK_FUSED_MOE_CAPTURE_PATCH_OK path={fused_moe_path}")
         print(f"DEEPSEEK_VLLM_TP8_CAPTURE_GATHER_PATCH_OK path={capture_path}")
         return 0
 
     w8a8_path.write_text(patch_w8a8_source(w8a8_source), encoding="utf-8")
+    fused_moe_path.write_text(patch_fused_moe_source(fused_moe_source), encoding="utf-8")
     capture_path.write_text(patch_capture_source(capture_source), encoding="utf-8")
     print(f"DEEPSEEK_W8A8_ROUTE_CAPTURE_PATCH_APPLIED path={w8a8_path}")
+    print(f"DEEPSEEK_FUSED_MOE_CAPTURE_PATCH_APPLIED path={fused_moe_path}")
     print(f"DEEPSEEK_VLLM_TP8_CAPTURE_GATHER_PATCH_APPLIED path={capture_path}")
     return 0
 
