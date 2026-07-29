@@ -165,6 +165,14 @@ if "pre-prepare capture" not in capture_source:
     raise RuntimeError("active capturer missing pre-prepare contract note")
 if "DEEPSEEK_ROUTE_CAPTURE_DIAG capturer_write" not in capture_source:
     raise RuntimeError("capturer temporary buffer-write diag log is absent")
+
+runner = one_source("vllm_ascend", "worker/model_runner_v1.py")
+runner_source = runner.read_text(encoding="utf-8")
+runner_marker = "# DEEPSEEK_V4_MODEL_RUNNER_BIND_CAPTURE_V9"
+if runner_source.count(runner_marker) != 1:
+    raise RuntimeError("DeepSeek model-runner bind marker is absent or duplicated")
+if "DEEPSEEK_ROUTE_CAPTURE_DIAG bind" not in runner_source:
+    raise RuntimeError("model-runner bind diagnostic log is absent")
 print("CAPTURE_PATCH_SOURCES_OK")')"
 [[ "${MARKER_COUNT}" == CAPTURE_PATCH_SOURCES_OK ]] || \
     die "derived image does not contain the required DeepSeek capture hooks"

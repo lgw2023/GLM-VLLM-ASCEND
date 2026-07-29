@@ -38,6 +38,15 @@ def original_fused_moe_source() -> str:
     )
 
 
+def original_model_runner_source() -> str:
+    return (
+        "class NPUModelRunner:\n"
+        + PATCHER.MODEL_RUNNER_BIND_ANCHOR
+        + "    def _align_memory(self, tensor, alignment):\n"
+        + "        return tensor\n"
+    )
+
+
 def original_capture_source() -> str:
     return (
         "class Capturer:\n"
@@ -90,9 +99,11 @@ class W8A8RouteCapturePatchTests(unittest.TestCase):
     def test_patches_capture_before_prepare_and_skips_w8a8_post_split(self) -> None:
         w8a8 = PATCHER.patch_w8a8_source(original_w8a8_source())
         fused = PATCHER.patch_fused_moe_source(original_fused_moe_source())
+        model_runner = PATCHER.patch_model_runner_source(original_model_runner_source())
         capture = PATCHER.patch_capture_source(original_capture_source())
         PATCHER.verify_w8a8_source(w8a8)
         PATCHER.verify_fused_moe_source(fused)
+        PATCHER.verify_model_runner_source(model_runner)
         PATCHER.verify_capture_source(capture)
 
         self.assertEqual(w8a8.count(PATCHER.W8A8_PATCH_MARKER), 1)
@@ -102,10 +113,15 @@ class W8A8RouteCapturePatchTests(unittest.TestCase):
         self.assertEqual(fused.count(PATCHER.FUSED_MOE_PATCH_MARKER), 1)
         self.assertIn("_route_capturer.capture(", fused)
         self.assertIn("DEEPSEEK_ROUTE_CAPTURE_DIAG pre_prepare", fused)
+        self.assertIn("_ds_global_route_capturer", fused)
         self.assertLess(
             fused.index(PATCHER.FUSED_MOE_PATCH_MARKER),
             fused.index("prepare_output = _EXTRA_CTX.moe_comm_method.prepare("),
         )
+
+        self.assertEqual(model_runner.count(PATCHER.MODEL_RUNNER_PATCH_MARKER), 1)
+        self.assertIn("DEEPSEEK_ROUTE_CAPTURE_DIAG bind", model_runner)
+        self.assertIn("model.modules()", model_runner)
 
         self.assertEqual(capture.count(PATCHER.CAPTURE_PATCH_MARKER), 1)
         self.assertIn("pre-prepare capture", capture)
@@ -114,11 +130,14 @@ class W8A8RouteCapturePatchTests(unittest.TestCase):
     def test_patches_reject_already_patched_source(self) -> None:
         w8a8 = PATCHER.patch_w8a8_source(original_w8a8_source())
         fused = PATCHER.patch_fused_moe_source(original_fused_moe_source())
+        model_runner = PATCHER.patch_model_runner_source(original_model_runner_source())
         capture = PATCHER.patch_capture_source(original_capture_source())
         with self.assertRaisesRegex(RuntimeError, "already present"):
             PATCHER.patch_w8a8_source(w8a8)
         with self.assertRaisesRegex(RuntimeError, "already present"):
             PATCHER.patch_fused_moe_source(fused)
+        with self.assertRaisesRegex(RuntimeError, "already present"):
+            PATCHER.patch_model_runner_source(model_runner)
         with self.assertRaisesRegex(RuntimeError, "already present"):
             PATCHER.patch_capture_source(capture)
 
@@ -127,6 +146,8 @@ class W8A8RouteCapturePatchTests(unittest.TestCase):
             PATCHER.patch_w8a8_source("def apply():\n    pass\n")
         with self.assertRaisesRegex(RuntimeError, "unexpected"):
             PATCHER.patch_fused_moe_source("def forward():\n    pass\n")
+        with self.assertRaisesRegex(RuntimeError, "unexpected"):
+            PATCHER.patch_model_runner_source("class Runner:\n    pass\n")
         with self.assertRaisesRegex(RuntimeError, "unexpected"):
             PATCHER.patch_capture_source("def capture():\n    pass\n")
 

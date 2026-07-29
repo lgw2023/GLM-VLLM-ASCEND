@@ -69,9 +69,8 @@ bash scripts/03_smoke_capture.sh configs/node1_w8a8.env --unique-scope all
 
 判读：
 
-- `pre_prepare_skip capturer=False` → capturer 没绑上，不是 shape 问题
-- `pre_prepare ... topk=(N/8, ...)` 且 N≈prompt → 采到的仍是 TP 分片，V9 切入点不对
-- `pre_prepare ... topk=(N, ...)` 但 `capturer_write write_rows` 仍是 N/8 → capturer 写回截断
+- `pre_prepare_skip capturer=False` → capturer 没绑上（旧镜像）；新补丁会打 `bind total_bound=...`，并启用 class 级 fallback
+- `pre_prepare ... topk=(N, ...)` 且出现 `capturer_write` → 绑定+capture 成功
 - 两边都是全量 N，但 smoke 仍 `prefill_dup` 高 → 坏在 D2H/slot 导出，不在 MoE forward
 
 ### 1.1 主实验：Node1 八卡 W8A8

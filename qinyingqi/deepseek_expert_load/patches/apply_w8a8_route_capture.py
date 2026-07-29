@@ -50,6 +50,10 @@ FUSED_MOE_CAPTURE_BLOCK = (
     "        # logical routes on the full batch before that split.\n"
     "        # DEEPSEEK_ROUTE_CAPTURE_DIAG: temporary shape dump (rate-limited).\n"
     "        _route_capturer = getattr(self, \"_ascend_routed_experts_capturer\", None)\n"
+    "        if _route_capturer is None:\n"
+    "            _route_capturer = getattr(\n"
+    "                type(self), \"_ds_global_route_capturer\", None\n"
+    "            )\n"
     "        _route_enabled = (\n"
     "            self.vllm_config.model_config is not None\n"
     "            and self.vllm_config.model_config.enable_return_routed_experts\n"
@@ -108,6 +112,81 @@ FUSED_MOE_CAPTURE_BLOCK = (
     "                    flush=True,\n"
     "                )\n"
     "\n"
+)
+
+MODEL_RUNNER_PACKAGE = "vllm_ascend"
+MODEL_RUNNER_TARGET_RELATIVE_PATH = "vllm_ascend/worker/model_runner_v1.py"
+MODEL_RUNNER_PACKAGE_RELATIVE_PATH = "worker/model_runner_v1.py"
+MODEL_RUNNER_PATCH_MARKER = "# DEEPSEEK_V4_MODEL_RUNNER_BIND_CAPTURE_V9"
+MODEL_RUNNER_BIND_ANCHOR = (
+    "    def _bind_routed_experts_capturer(self, capturer=None) -> None:\n"
+    "        # Upstream binds via ``module.router.set_capture_fn(...)`` on\n"
+    "        # FusedMoE layers whose router is a ``BaseRouter``. Ascend's\n"
+    "        # ``select_experts`` does not go through ``BaseRouter``, so the\n"
+    "        # upstream hook never fires. Instead, stash the capturer as a\n"
+    "        # plain attribute on every FusedMoE layer; ``apply()`` reads it\n"
+    "        # back on the hot path.\n"
+    "        from vllm.model_executor.layers.fused_moe.layer import FusedMoE\n"
+    "        for module in self.compilation_config.static_forward_context.values():\n"
+    "            if isinstance(module, FusedMoE):\n"
+    "                module._ascend_routed_experts_capturer = capturer\n"
+)
+MODEL_RUNNER_BIND_REPLACEMENT = (
+    "    def _bind_routed_experts_capturer(self, capturer=None) -> None:\n"
+    "        # DEEPSEEK_V4_MODEL_RUNNER_BIND_CAPTURE_V9\n"
+    "        # Ascend W8A8 capture reads ``_ascend_routed_experts_capturer`` on\n"
+    "        # the live MoE layer. DeepSeek-V4 may not match the old\n"
+    "        # ``isinstance(..., FusedMoE)`` scan over static_forward_context,\n"
+    "        # so bind both the registry and the loaded model tree, and keep a\n"
+    "        # class-level fallback for the custom-op hot path.\n"
+    "        from vllm.model_executor.layers.fused_moe.layer import FusedMoE\n"
+    "        from vllm_ascend.ops.fused_moe.fused_moe import AscendFusedMoE\n"
+    "\n"
+    "        AscendFusedMoE._ds_global_route_capturer = capturer\n"
+    "        bound_ids: set[int] = set()\n"
+    "        static_fused = 0\n"
+    "        model_fused = 0\n"
+    "\n"
+    "        def _maybe_bind(module) -> None:\n"
+    "            nonlocal static_fused, model_fused\n"
+    "            is_fused = isinstance(module, FusedMoE)\n"
+    "            is_ascend = isinstance(module, AscendFusedMoE)\n"
+    "            is_duck = (\n"
+    "                not is_fused\n"
+    "                and hasattr(module, \"moe_config\")\n"
+    "                and hasattr(module, \"layer_name\")\n"
+    "                and hasattr(module, \"forward_impl\")\n"
+    "            )\n"
+    "            if not (is_fused or is_ascend or is_duck):\n"
+    "                return\n"
+    "            module_id = id(module)\n"
+    "            if module_id in bound_ids:\n"
+    "                return\n"
+    "            module._ascend_routed_experts_capturer = capturer\n"
+    "            bound_ids.add(module_id)\n"
+    "\n"
+    "        for module in self.compilation_config.static_forward_context.values():\n"
+    "            before = len(bound_ids)\n"
+    "            _maybe_bind(module)\n"
+    "            if len(bound_ids) > before:\n"
+    "                static_fused += 1\n"
+    "\n"
+    "        model = getattr(self, \"model\", None)\n"
+    "        if model is not None:\n"
+    "            for module in model.modules():\n"
+    "                before = len(bound_ids)\n"
+    "                _maybe_bind(module)\n"
+    "                if len(bound_ids) > before:\n"
+    "                    model_fused += 1\n"
+    "\n"
+    "        print(\n"
+    "            \"DEEPSEEK_ROUTE_CAPTURE_DIAG bind \"\n"
+    "            f\"capturer={'set' if capturer is not None else 'none'} \"\n"
+    "            f\"static_ctx={len(self.compilation_config.static_forward_context)} \"\n"
+    "            f\"static_bound={static_fused} model_bound={model_fused} \"\n"
+    "            f\"total_bound={len(bound_ids)}\",\n"
+    "            flush=True,\n"
+    "        )\n"
 )
 
 # vLLM-Ascend's worker patch is not imported when vLLM is exactly 0.22.1.
@@ -200,7 +279,7 @@ def package_source_path(
 
 
 def target_path(package: str, package_relative_path: str) -> Path:
-    if package in {W8A8_PACKAGE, FUSED_MOE_PACKAGE}:
+    if package in {W8A8_PACKAGE, FUSED_MOE_PACKAGE, MODEL_RUNNER_PACKAGE}:
         return package_source_path(
             "vllm_ascend",
             "vllm_ascend",
@@ -256,6 +335,16 @@ def patch_fused_moe_source(source: str) -> str:
     return patched
 
 
+def patch_model_runner_source(source: str) -> str:
+    if MODEL_RUNNER_PATCH_MARKER in source:
+        raise RuntimeError("DeepSeek model-runner bind patch is already present")
+    if source.count(MODEL_RUNNER_BIND_ANCHOR) != 1:
+        raise RuntimeError("unexpected model_runner bind anchor is not unique")
+    patched = source.replace(MODEL_RUNNER_BIND_ANCHOR, MODEL_RUNNER_BIND_REPLACEMENT, 1)
+    compile(patched, MODEL_RUNNER_TARGET_RELATIVE_PATH, "exec")
+    return patched
+
+
 def patch_capture_source(source: str) -> str:
     if CAPTURE_PATCH_MARKER in source:
         raise RuntimeError("DeepSeek vLLM TP8 capture-gather patch is already present")
@@ -292,7 +381,19 @@ def verify_fused_moe_source(source: str) -> None:
         raise RuntimeError("fused-moe capture is not before prepare()")
     if "DEEPSEEK_ROUTE_CAPTURE_DIAG pre_prepare" not in source:
         raise RuntimeError("fused-moe temporary capture diag log is absent")
+    if "_ds_global_route_capturer" not in source:
+        raise RuntimeError("fused-moe global capturer fallback is absent")
     compile(source, FUSED_MOE_TARGET_RELATIVE_PATH, "exec")
+
+
+def verify_model_runner_source(source: str) -> None:
+    if source.count(MODEL_RUNNER_PATCH_MARKER) != 1:
+        raise RuntimeError("DeepSeek model-runner bind marker is missing or duplicated")
+    if "DEEPSEEK_ROUTE_CAPTURE_DIAG bind" not in source:
+        raise RuntimeError("model-runner bind diagnostic log is absent")
+    if "AscendFusedMoE._ds_global_route_capturer = capturer" not in source:
+        raise RuntimeError("model-runner global capturer fallback is absent")
+    compile(source, MODEL_RUNNER_TARGET_RELATIVE_PATH, "exec")
 
 
 def verify_capture_source(source: str) -> None:
@@ -325,25 +426,31 @@ def main() -> int:
     assert_package_versions()
     w8a8_path = target_path(W8A8_PACKAGE, W8A8_PACKAGE_RELATIVE_PATH)
     fused_moe_path = target_path(FUSED_MOE_PACKAGE, FUSED_MOE_PACKAGE_RELATIVE_PATH)
+    model_runner_path = target_path(MODEL_RUNNER_PACKAGE, MODEL_RUNNER_PACKAGE_RELATIVE_PATH)
     capture_path = target_path(CAPTURE_PACKAGE, CAPTURE_PACKAGE_RELATIVE_PATH)
     w8a8_source = w8a8_path.read_text(encoding="utf-8")
     fused_moe_source = fused_moe_path.read_text(encoding="utf-8")
+    model_runner_source = model_runner_path.read_text(encoding="utf-8")
     capture_source = capture_path.read_text(encoding="utf-8")
 
     if args.verify:
         verify_w8a8_source(w8a8_source)
         verify_fused_moe_source(fused_moe_source)
+        verify_model_runner_source(model_runner_source)
         verify_capture_source(capture_source)
         print(f"DEEPSEEK_W8A8_ROUTE_CAPTURE_PATCH_OK path={w8a8_path}")
         print(f"DEEPSEEK_FUSED_MOE_CAPTURE_PATCH_OK path={fused_moe_path}")
+        print(f"DEEPSEEK_MODEL_RUNNER_BIND_PATCH_OK path={model_runner_path}")
         print(f"DEEPSEEK_VLLM_TP8_CAPTURE_GATHER_PATCH_OK path={capture_path}")
         return 0
 
     w8a8_path.write_text(patch_w8a8_source(w8a8_source), encoding="utf-8")
     fused_moe_path.write_text(patch_fused_moe_source(fused_moe_source), encoding="utf-8")
+    model_runner_path.write_text(patch_model_runner_source(model_runner_source), encoding="utf-8")
     capture_path.write_text(patch_capture_source(capture_source), encoding="utf-8")
     print(f"DEEPSEEK_W8A8_ROUTE_CAPTURE_PATCH_APPLIED path={w8a8_path}")
     print(f"DEEPSEEK_FUSED_MOE_CAPTURE_PATCH_APPLIED path={fused_moe_path}")
+    print(f"DEEPSEEK_MODEL_RUNNER_BIND_PATCH_APPLIED path={model_runner_path}")
     print(f"DEEPSEEK_VLLM_TP8_CAPTURE_GATHER_PATCH_APPLIED path={capture_path}")
     return 0
 
