@@ -44,7 +44,7 @@ def original_capture_source() -> str:
         "    def capture(self, layer_id, topk_ids):\n"
         + PATCHER.CAPTURE_ANCHOR
         + "            pass\n"
-        + "        self.device_buffer[:token_num_per_dp, layer_id, :] = topk_ids[start_loc:end_loc, :]\n"
+        + PATCHER.CAPTURE_BUFFER_ANCHOR
     )
 
 
@@ -101,6 +101,7 @@ class W8A8RouteCapturePatchTests(unittest.TestCase):
 
         self.assertEqual(fused.count(PATCHER.FUSED_MOE_PATCH_MARKER), 1)
         self.assertIn("_route_capturer.capture(", fused)
+        self.assertIn("DEEPSEEK_ROUTE_CAPTURE_DIAG pre_prepare", fused)
         self.assertLess(
             fused.index(PATCHER.FUSED_MOE_PATCH_MARKER),
             fused.index("prepare_output = _EXTRA_CTX.moe_comm_method.prepare("),
@@ -108,6 +109,7 @@ class W8A8RouteCapturePatchTests(unittest.TestCase):
 
         self.assertEqual(capture.count(PATCHER.CAPTURE_PATCH_MARKER), 1)
         self.assertIn("pre-prepare capture", capture)
+        self.assertIn("DEEPSEEK_ROUTE_CAPTURE_DIAG capturer_write", capture)
 
     def test_patches_reject_already_patched_source(self) -> None:
         w8a8 = PATCHER.patch_w8a8_source(original_w8a8_source())

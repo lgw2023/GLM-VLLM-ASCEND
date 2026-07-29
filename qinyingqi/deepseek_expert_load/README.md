@@ -58,6 +58,22 @@ bash scripts/08_launch_tp8_w8a8.sh \
   --confirm-npu-ids 0,1,2,3,4,5,6,7
 ```
 
+当前 v9 补丁带**临时诊断日志**（限速，每进程最多十几行），前缀
+`DEEPSEEK_ROUTE_CAPTURE_DIAG`。重建并 smoke 后抓：
+
+```bash
+CID=$(cat "${RUN_ROOT}/$(tr -d '[:space:]' < "${RUN_ROOT}/current-run-id")/container.id")
+docker logs "$CID" 2>&1 | grep DEEPSEEK_ROUTE_CAPTURE_DIAG | head -40
+bash scripts/03_smoke_capture.sh configs/node1_w8a8.env --unique-scope all
+```
+
+判读：
+
+- `pre_prepare_skip capturer=False` → capturer 没绑上，不是 shape 问题
+- `pre_prepare ... topk=(N/8, ...)` 且 N≈prompt → 采到的仍是 TP 分片，V9 切入点不对
+- `pre_prepare ... topk=(N, ...)` 但 `capturer_write write_rows` 仍是 N/8 → capturer 写回截断
+- 两边都是全量 N，但 smoke 仍 `prefill_dup` 高 → 坏在 D2H/slot 导出，不在 MoE forward
+
 ### 1.1 主实验：Node1 八卡 W8A8
 
 在项目逻辑 Node1（`7.150.15.14`）使用：

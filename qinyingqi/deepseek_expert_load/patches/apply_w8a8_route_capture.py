@@ -48,17 +48,20 @@ FUSED_MOE_CAPTURE_BLOCK = (
     "        # DEEPSEEK_V4_FUSED_MOE_CAPTURE_BEFORE_PREPARE_V9\n"
     "        # All2All/MC2 prepare() tensor_splits tokens across TP. Capture\n"
     "        # logical routes on the full batch before that split.\n"
+    "        # DEEPSEEK_ROUTE_CAPTURE_DIAG: temporary shape dump (rate-limited).\n"
     "        _route_capturer = getattr(self, \"_ascend_routed_experts_capturer\", None)\n"
-    "        if (\n"
-    "            _route_capturer is not None\n"
-    "            and self.vllm_config.model_config is not None\n"
+    "        _route_enabled = (\n"
+    "            self.vllm_config.model_config is not None\n"
     "            and self.vllm_config.model_config.enable_return_routed_experts\n"
-    "        ):\n"
+    "        )\n"
+    "        if _route_capturer is not None and _route_enabled:\n"
     "            _capture_ids = None\n"
+    "            _capture_src = \"select_experts\"\n"
     "            if self.multistream_overlap_gate:\n"
     "                _fc3 = get_flash_common3_context()\n"
     "                if _fc3 is not None and getattr(_fc3, \"topk_ids\", None) is not None:\n"
     "                    _capture_ids = _fc3.topk_ids\n"
+    "                    _capture_src = \"flash_common3\"\n"
     "            if _capture_ids is None:\n"
     "                _capture_weights, _capture_ids = select_experts(\n"
     "                    hidden_states=hidden_states,\n"
@@ -76,9 +79,34 @@ FUSED_MOE_CAPTURE_BLOCK = (
     "                    input_ids=getattr(get_forward_context(), \"input_ids\", None),\n"
     "                    tid2eid=self.tid2eid,\n"
     "                )\n"
+    "            _diag_n = getattr(type(self), \"_ds_route_diag_n\", 0)\n"
+    "            if _diag_n < 16 and self.layer_id in (0, 1, 2, 3, 4, 20, 40):\n"
+    "                type(self)._ds_route_diag_n = _diag_n + 1\n"
+    "                print(\n"
+    "                    \"DEEPSEEK_ROUTE_CAPTURE_DIAG pre_prepare \"\n"
+    "                    f\"layer={self.layer_id} src={_capture_src} \"\n"
+    "                    f\"hidden={tuple(hidden_states.shape)} \"\n"
+    "                    f\"router={tuple(router_logits.shape)} \"\n"
+    "                    f\"topk={tuple(_capture_ids.shape)} \"\n"
+    "                    f\"tp={getattr(self.moe_config, 'tp_size', '?')} \"\n"
+    "                    f\"flashcomm1={getattr(_EXTRA_CTX, 'flash_comm_v1_enabled', '?')}\",\n"
+    "                    flush=True,\n"
+    "                )\n"
     "            _route_capturer.capture(\n"
     "                layer_id=self.layer_id, topk_ids=_capture_ids\n"
     "            )\n"
+    "        else:\n"
+    "            _miss_n = getattr(type(self), \"_ds_route_diag_miss\", 0)\n"
+    "            if _miss_n < 8 and self.layer_id in (0, 1, 2, 3, 4):\n"
+    "                type(self)._ds_route_diag_miss = _miss_n + 1\n"
+    "                print(\n"
+    "                    \"DEEPSEEK_ROUTE_CAPTURE_DIAG pre_prepare_skip \"\n"
+    "                    f\"layer={self.layer_id} capturer={_route_capturer is not None} \"\n"
+    "                    f\"enabled={_route_enabled} \"\n"
+    "                    f\"hidden={tuple(hidden_states.shape)} \"\n"
+    "                    f\"router={tuple(router_logits.shape)}\",\n"
+    "                    flush=True,\n"
+    "                )\n"
     "\n"
 )
 
@@ -101,11 +129,41 @@ CAPTURE_REPLACEMENT = (
     "        ctx = get_forward_context()\n"
     "        # DEEPSEEK_V4_VLLM_TP8_CAPTURE_GATHER_V9\n"
     "        # Expect full-length topk_ids from AscendFusedMoE pre-prepare capture.\n"
+    "        # DEEPSEEK_ROUTE_CAPTURE_DIAG: see buffer-write dump below.\n"
     "        if ctx.dp_metadata is None:  # single dp\n"
     "            start_loc = 0\n"
     "            end_loc = topk_ids.shape[0]\n"
     "            token_num_per_dp = topk_ids.shape[0]\n"
     "        else:  # multi dp\n"
+)
+
+# Injected immediately before the device_buffer write.
+CAPTURE_BUFFER_ANCHOR = (
+    "        self.device_buffer[:token_num_per_dp, layer_id, :] = topk_ids[\n"
+    "            start_loc:end_loc, :\n"
+    "        ]\n"
+)
+CAPTURE_BUFFER_REPLACEMENT = (
+    "        # DEEPSEEK_ROUTE_CAPTURE_DIAG temporary buffer-write dump.\n"
+    "        _diag_n = getattr(type(self), \"_ds_route_diag_n\", 0)\n"
+    "        if _diag_n < 16 and layer_id in (0, 1, 2, 3, 4, 20, 40):\n"
+    "            type(self)._ds_route_diag_n = _diag_n + 1\n"
+    "            _slice = topk_ids[start_loc:end_loc]\n"
+    "            _nz = (\n"
+    "                int((_slice != 0).any(dim=-1).sum().item())\n"
+    "                if _slice.numel() > 0\n"
+    "                else 0\n"
+    "            )\n"
+    "            print(\n"
+    "                \"DEEPSEEK_ROUTE_CAPTURE_DIAG capturer_write \"\n"
+    "                f\"layer={layer_id} in_shape={tuple(topk_ids.shape)} \"\n"
+    "                f\"write_rows={token_num_per_dp} start={start_loc} end={end_loc} \"\n"
+    "                f\"nonzero_rows={_nz} tp_size={self.tp_size} dp_rank={self.dp_rank}\",\n"
+    "                flush=True,\n"
+    "            )\n"
+    "        self.device_buffer[:token_num_per_dp, layer_id, :] = topk_ids[\n"
+    "            start_loc:end_loc, :\n"
+    "        ]\n"
 )
 
 
@@ -203,7 +261,10 @@ def patch_capture_source(source: str) -> str:
         raise RuntimeError("DeepSeek vLLM TP8 capture-gather patch is already present")
     if source.count(CAPTURE_ANCHOR) != 1:
         raise RuntimeError("unexpected vLLM routed-experts capture source layout")
+    if source.count(CAPTURE_BUFFER_ANCHOR) != 1:
+        raise RuntimeError("unexpected vLLM routed-experts buffer-write layout")
     patched = source.replace(CAPTURE_ANCHOR, CAPTURE_REPLACEMENT, 1)
+    patched = patched.replace(CAPTURE_BUFFER_ANCHOR, CAPTURE_BUFFER_REPLACEMENT, 1)
     compile(patched, CAPTURE_TARGET_RELATIVE_PATH, "exec")
     return patched
 
@@ -229,6 +290,8 @@ def verify_fused_moe_source(source: str) -> None:
     capture_index = source.index("_route_capturer.capture(")
     if not marker_index < capture_index < prepare_index:
         raise RuntimeError("fused-moe capture is not before prepare()")
+    if "DEEPSEEK_ROUTE_CAPTURE_DIAG pre_prepare" not in source:
+        raise RuntimeError("fused-moe temporary capture diag log is absent")
     compile(source, FUSED_MOE_TARGET_RELATIVE_PATH, "exec")
 
 
@@ -242,6 +305,8 @@ def verify_capture_source(source: str) -> None:
         raise RuntimeError("TP8 gather marker is not before the routed-experts buffer write")
     if "pre-prepare capture" not in source:
         raise RuntimeError("TP8 capturer marker missing pre-prepare contract note")
+    if "DEEPSEEK_ROUTE_CAPTURE_DIAG capturer_write" not in source:
+        raise RuntimeError("capturer temporary buffer-write diag log is absent")
     compile(source, CAPTURE_TARGET_RELATIVE_PATH, "exec")
 
 

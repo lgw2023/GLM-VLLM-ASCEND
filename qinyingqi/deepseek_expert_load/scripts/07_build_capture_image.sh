@@ -153,6 +153,8 @@ if fused_source.index(fused_marker) > fused_source.index(
     raise RuntimeError("fused-moe capture marker is after prepare()")
 if "_route_capturer.capture(" not in fused_source:
     raise RuntimeError("fused-moe pre-prepare capturer call is absent")
+if "DEEPSEEK_ROUTE_CAPTURE_DIAG pre_prepare" not in fused_source:
+    raise RuntimeError("fused-moe temporary capture diag log is absent")
 
 capture = one_source("vllm", "model_executor/layers/fused_moe/routed_experts_capturer.py")
 capture_source = capture.read_text(encoding="utf-8")
@@ -161,6 +163,8 @@ if capture_source.count(capture_marker) != 1:
     raise RuntimeError("DeepSeek vLLM TP8 capture-gather marker is absent or duplicated")
 if "pre-prepare capture" not in capture_source:
     raise RuntimeError("active capturer missing pre-prepare contract note")
+if "DEEPSEEK_ROUTE_CAPTURE_DIAG capturer_write" not in capture_source:
+    raise RuntimeError("capturer temporary buffer-write diag log is absent")
 print("CAPTURE_PATCH_SOURCES_OK")')"
 [[ "${MARKER_COUNT}" == CAPTURE_PATCH_SOURCES_OK ]] || \
     die "derived image does not contain the required DeepSeek capture hooks"
