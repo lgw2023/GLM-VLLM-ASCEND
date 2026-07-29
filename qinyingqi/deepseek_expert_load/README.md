@@ -8,6 +8,47 @@ Mac 不下载模型和 benchmark。模型、镜像、NPU 计算和结果都留�
 
 ## 1. 当前可执行结论
 
+### 0. 先跑通（绕过 uniqueness 死结）
+
+smoke 报 `top-k expert IDs are not unique` 的根因是：启动脚本曾打开
+`VLLM_ASCEND_ENABLE_FLASHCOMM1=1`（sequence parallel）。DP=1 + TP=8 时每个
+rank 只看到 token 分片，未写满的 buffer 全是 0，看起来像 top-k 里重复的
+expert 0。
+
+**最小修复：关 SP 后重建一个 run，不必先重建镜像。**
+
+```bash
+cd /home/qinyingqi/GLM-VLLM-ASCEND
+git pull
+cd qinyingqi/deepseek_expert_load
+
+bash scripts/07_stop.sh configs/node1_w8a8.env --remove
+
+export RUN_ID="dsv4-w8a8-tp8-nosp-$(date -u +%Y%m%dT%H%M%SZ)"
+bash scripts/08_launch_tp8_w8a8.sh \
+  configs/node1_w8a8.env \
+  --confirm-npu-ids 0,1,2,3,4,5,6,7
+bash scripts/02_wait_ready.sh configs/node1_w8a8.env
+bash scripts/03_smoke_capture.sh configs/node1_w8a8.env
+```
+
+确认 `launch.command.sh` 里是 `VLLM_ASCEND_ENABLE_FLASHCOMM1=0` 且
+`enable_flashcomm1:false`。成功应输出 `CAPTURE_OK`。
+
+若仍 uniqueness 失败，可先把 benchmark 跑完再修路由质量：
+
+```bash
+bash scripts/03_smoke_capture.sh configs/node1_w8a8.env --allow-duplicate-topk
+bash scripts/04_run_benchmarks.sh \
+  configs/node1_w8a8.env \
+  --benchmarks mmlu_pro,swebench_lite,livecodebench,ruler_niah \
+  --max-requests 5 \
+  --allow-duplicate-topk
+```
+
+`--allow-duplicate-topk` 会保存原始 route 和 `route-quality.json`，但
+**不能拿来做可信的 20/90 负载结论**。正式统计前必须先让严格 smoke 通过。
+
 ### 1.1 主实验：Node1 八卡 W8A8
 
 在项目逻辑 Node1（`7.150.15.14`）使用：
@@ -28,11 +69,12 @@ Atlas 800 A2、8 x 64 GiB 部署 W8A8：
 <https://docs.vllm.ai/projects/ascend/en/main/tutorials/models/DeepSeek-V4-Flash.html>
 
 本实验使用官方资源拓扑，但为 Expert 路由基线关闭 MTP、async scheduling、
-prefix caching、EPLB 和动态负载均衡；否则可能把额外运行机制混入任务分布差异。
+prefix caching、EPLB、动态负载均衡，以及 **FLASHCOMM1 / sequence parallel**；
+否则 SP 分片会把 padding 零值混进 logical Expert ID，导致 top-k 不唯一。
 派生镜像在 vLLM-Ascend 通用 `W8A8_DYNAMIC` MoE 执行方法中，调用 Ascend 的
 `FusedMoE` routed-expert capturer 来保存 logical Expert ID，并直接修补 vLLM 0.22.1
-实际使用的 `RoutedExpertsCapturer`，在 DP=1、TP=8 prefill 中汇聚
-sequence-parallel token 行。启动脚本会同时核验 Docker label 和两个源码 marker。
+实际使用的 `RoutedExpertsCapturer`；v5 仅在确认是 SP shard 时才做 TP gather。
+启动脚本会核验 Docker label（接受 v4 或 v5）和对应源码 marker。
 
 ### 1.2 不再在 A2 上启动原生 FP8+MXFP4 目录
 
@@ -99,6 +141,8 @@ HOST_NPU_IDS=0,1,2,3,4,5,6,7
 TARGET_SOC=ASCEND910B1
 REQUIRED_EXPERT_QUANTIZATION=w8a8
 ```
+
+已有 v4 镜像可继续用；重建时再切到 v5 tag。启动脚本接受 v4/v5 label。
 
 `MODEL_HOST_PATH` 和 `BENCHMARK_DATA_ROOT` 在 Node1 是 Node0 磁盘的网络挂载；
 结果写入 Node1 本地 `/data/disk2`。
@@ -410,31 +454,40 @@ vLLM/vLLM-Ascend 版本通过 image audit。
 
 ### `top-k expert IDs are not unique for every token/layer`
 
-不要继续跑 benchmark，也不要放宽这个校验。对于 DeepSeek-V4 的 `top_k=6`，同一
-token/layer 的 6 个 logical Expert ID 必须互异。旧
-`glm52-expert-capture:...-v1` 调用了 upstream 的 `router.capture_fn`，但 Ascend
-W8A8 路径实际把 capturer 绑定在 `FusedMoE._ascend_routed_experts_capturer`；因此 v1
-可能返回未写入的全零 buffer。v2 修正了该 hook，但在 DP=1、TP=8 prefill 中只保存
-rank 0 的 sequence-parallel shard。v3 尝试修改
-`vllm_ascend.patch.worker.patch_routed_experts_capture`，但 vLLM-Ascend 在 vLLM 0.22.1
-下明确不导入该模块，因此运行结果与 v2 相同。v4 直接修改运行时实际实例化的
-`vllm.model_executor.layers.fused_moe.routed_experts_capturer.RoutedExpertsCapturer`，并用
-TP group all-gather 恢复完整 logical route tensor。
-
-按第 4.1 节构建 v4 镜像、更新本地 env，然后停止旧服务并新建一个 run：
+优先检查本次启动是否仍打开了 FLASHCOMM1/SP：
 
 ```bash
-bash scripts/07_stop.sh configs/node1_w8a8.env --remove
-
-export RUN_ID="dsv4-w8a8-tp8-v4-$(date -u +%Y%m%dT%H%M%SZ)"
-bash scripts/08_launch_tp8_w8a8.sh \
-  configs/node1_w8a8.env \
-  --confirm-npu-ids 0,1,2,3,4,5,6,7
-bash scripts/02_wait_ready.sh configs/node1_w8a8.env
-bash scripts/03_smoke_capture.sh configs/node1_w8a8.env
+source configs/node1_w8a8.env
+RUN_ID=$(tr -d '[:space:]' < "${RUN_ROOT}/current-run-id")
+grep -E 'FLASHCOMM1|enable_flashcomm1' "${RUN_ROOT}/${RUN_ID}/launch.command.sh"
 ```
 
-旧 run 中产生的 smoke 或 benchmark route 文件不具备分析价值，不能与 v4 结果混合。
+必须是 `FLASHCOMM1=0` 和 `enable_flashcomm1:false`。若不是，按第 0 节停服重建
+run，不要继续 benchmark。
+
+仍失败时，看 smoke 输出里的 `duplicate_cell_fraction` /
+`all_zero_cell_fraction`。高全零比例通常仍是 SP 分片或 capturer 未写入。
+临时可加 `--allow-duplicate-topk` 先跑通请求；正式负载分析前再构建 v5 镜像：
+
+```bash
+bash scripts/07_build_capture_image.sh
+sed -i \
+  -e 's#^IMAGE_REF=.*#IMAGE_REF=deepseek-v4-expert-capture:v0.22.1rc1-w8a8-v5#' \
+  -e 's#^CAPTURE_PATCH_ID=.*#CAPTURE_PATCH_ID=deepseek-v4-w8a8-logical-topk-v5#' \
+  configs/node1_w8a8.env
+```
+
+旧 run 中产生的 imperfect route 不能与严格采集结果混合分析。
+
+不要放宽严格模式下的 uniqueness 校验来宣称 20/90。对于 DeepSeek-V4 的
+`top_k=6`，同一 token/layer 的 6 个 logical Expert ID 必须互异。历史补丁代际：
+
+- v1：钩错 `router.capture_fn`，Ascend W8A8 实际绑定
+  `FusedMoE._ascend_routed_experts_capturer` → 全零
+- v2：钩对了，但 TP=8 SP 只采到 rank0 shard
+- v3：改了不会被 vLLM 0.22.1 导入的 worker patch 文件
+- v4：改真正的 `RoutedExpertsCapturer`，但 DP=1 gather 条件过宽
+- v5：仅在确认 SP shard（ceil-div）时 gather；主路径仍应关 FLASHCOMM1
 
 ## 14. 本地与远端测试
 

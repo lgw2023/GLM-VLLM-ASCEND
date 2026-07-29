@@ -10,6 +10,7 @@ shift || true
 BENCHMARKS="mmlu_pro,swebench_lite,livecodebench,ruler_niah"
 RESUME=0
 MAX_REQUESTS_OVERRIDE=""
+ALLOW_DUPLICATE=0
 while (($#)); do
     case "$1" in
         --benchmarks)
@@ -24,8 +25,12 @@ while (($#)); do
             RESUME=1
             shift
             ;;
+        --allow-duplicate-topk)
+            ALLOW_DUPLICATE=1
+            shift
+            ;;
         -h|--help)
-            printf 'Usage: bash scripts/04_run_benchmarks.sh CONFIG [--benchmarks a,b] [--max-requests N] [--resume]\n'
+            printf 'Usage: bash scripts/04_run_benchmarks.sh CONFIG [--benchmarks a,b] [--max-requests N] [--resume] [--allow-duplicate-topk]\n'
             exit 0
             ;;
         *)
@@ -67,8 +72,15 @@ for benchmark in "${SELECTED[@]}"; do
     if ((RESUME == 1)); then
         ARGS+=(--resume)
     fi
+    if ((ALLOW_DUPLICATE == 1)); then
+        ARGS+=(--allow-duplicate-topk)
+    fi
     python3 "${SCRIPT_DIR}/03_capture_routes.py" "${ARGS[@]}"
 done
 
-printf 'BENCHMARK_CAPTURE_OK run_id=%s benchmarks=%s\n' "${RUN_ID}" "${BENCHMARKS}"
+printf 'BENCHMARK_CAPTURE_OK run_id=%s benchmarks=%s allow_duplicate_topk=%s\n' \
+    "${RUN_ID}" "${BENCHMARKS}" "${ALLOW_DUPLICATE}"
 printf 'Next: bash scripts/05_analyze.sh %s\n' "${CONFIG_PATH}"
+if ((ALLOW_DUPLICATE == 1)); then
+    printf 'NOTE: imperfect routes were accepted; load analysis is diagnostic only until unique top-k is fixed.\n'
+fi

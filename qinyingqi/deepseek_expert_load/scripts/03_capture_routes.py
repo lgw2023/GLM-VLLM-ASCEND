@@ -95,6 +95,8 @@ def extract_response(
     response: dict[str, Any],
     expected_model: str,
     topology: ModelTopology,
+    *,
+    require_unique_topk: bool = True,
 ) -> tuple[np.ndarray, dict[str, Any]]:
     if response.get("model") != expected_model:
         raise ValueError(
@@ -124,6 +126,7 @@ def extract_response(
         topology,
         prompt_tokens=len(prompt_ids),
         completion_tokens=len(completion_ids),
+        require_unique_topk=require_unique_topk,
     )
     if summary["covered_experts"] <= topology.top_k or summary["unique_route_tuples"] <= 1:
         raise ValueError("routes are constant or stale across the request")
@@ -197,6 +200,8 @@ def rebuild_aggregate(
     output_dir: Path,
     completed: dict[str, dict[str, Any]],
     topology: ModelTopology,
+    *,
+    require_unique_topk: bool = True,
 ) -> tuple[np.ndarray, int, int]:
     counts = np.zeros((3, topology.num_moe_layers, topology.num_experts), dtype=np.int64)
     prompt_tokens = 0
@@ -210,7 +215,13 @@ def rebuild_aggregate(
         routes = np.load(route_path, allow_pickle=False)
         prompt = int(record["prompt_tokens"])
         completion = int(record["completion_tokens"])
-        validate_routes(routes, topology, prompt, completion)
+        validate_routes(
+            routes,
+            topology,
+            prompt,
+            completion,
+            require_unique_topk=require_unique_topk,
+        )
         counts += count_assignments(routes, topology, prompt)
         prompt_tokens += prompt
         completion_tokens += completion
@@ -232,6 +243,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=1024)
     parser.add_argument("--timeout-seconds", type=int, default=1800)
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument(
+        "--allow-duplicate-topk",
+        action="store_true",
+        help=(
+            "Keep collecting when top-k IDs are not unique. Saves routes and "
+            "quality diagnostics so benchmarks can finish before fixing capture."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -288,6 +307,7 @@ def main() -> int:
         "topology": topology.to_dict(),
         "max_tokens": args.max_tokens,
         "seed": args.seed,
+        "allow_duplicate_topk": bool(args.allow_duplicate_topk),
     }
     if manifest_path.exists():
         existing_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -305,14 +325,20 @@ def main() -> int:
 
     completed = load_completed(records_path)
     counts, total_prompt_tokens, total_completion_tokens = rebuild_aggregate(
-        output_dir, completed, topology
+        output_dir,
+        completed,
+        topology,
+        require_unique_topk=not args.allow_duplicate_topk,
     )
     endpoint = f"{args.base_url.rstrip('/')}/chat/completions"
     failures_path = output_dir / "failures.jsonl"
+    imperfect_routes = 0
 
     for index, record in enumerate(records):
         request_id = record["request_id"]
         if request_id in completed:
+            if not completed[request_id].get("route_summary", {}).get("unique_topk", True):
+                imperfect_routes += 1
             continue
         stem = safe_stem(request_id, index)
         payload = {
@@ -335,7 +361,12 @@ def main() -> int:
         started = time.monotonic()
         try:
             response = post_json(endpoint, payload, args.timeout_seconds)
-            routes, route_summary = extract_response(response, args.model, topology)
+            routes, route_summary = extract_response(
+                response,
+                args.model,
+                topology,
+                require_unique_topk=not args.allow_duplicate_topk,
+            )
         except Exception as exc:
             append_jsonl(
                 failures_path,
@@ -362,6 +393,8 @@ def main() -> int:
 
         prompt_count = int(route_summary["prompt_tokens"])
         completion_count = int(route_summary["completion_tokens"])
+        if not route_summary.get("unique_topk", True):
+            imperfect_routes += 1
         completed_record = {
             "completed_at": utc_now(),
             "request_id": request_id,
@@ -397,15 +430,29 @@ def main() -> int:
                     "prompt_tokens": prompt_count,
                     "completion_tokens": completion_count,
                     "covered_experts": route_summary["covered_experts"],
+                    "unique_topk": route_summary.get("unique_topk", True),
                 },
                 sort_keys=True,
             ),
             flush=True,
         )
 
+    quality = {
+        "schema_version": 1,
+        "benchmark": benchmark,
+        "request_count": len(completed),
+        "imperfect_route_requests": imperfect_routes,
+        "allow_duplicate_topk": bool(args.allow_duplicate_topk),
+        "routes_trusted_for_load_analysis": imperfect_routes == 0,
+    }
+    (output_dir / "route-quality.json").write_text(
+        json.dumps(quality, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    status = "CAPTURE_OK" if imperfect_routes == 0 else "CAPTURE_OK_WITH_IMPERFECT_ROUTES"
     print(
-        f"CAPTURE_OK benchmark={benchmark} requests={len(completed)} "
-        f"output={output_dir}"
+        f"{status} benchmark={benchmark} requests={len(completed)} "
+        f"imperfect_routes={imperfect_routes} output={output_dir}"
     )
     return 0
 

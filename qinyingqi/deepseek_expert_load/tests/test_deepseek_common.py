@@ -41,11 +41,29 @@ class DeepSeekCommonTests(unittest.TestCase):
         summary = validate_routes(routes, self.topology, prompt_tokens=3, completion_tokens=3)
         self.assertEqual(summary["prefill_rows"], 3)
         self.assertEqual(summary["decode_rows"], 2)
+        self.assertTrue(summary["unique_topk"])
         counts = count_assignments(routes, self.topology, prompt_tokens=3)
         self.assertEqual(counts.shape, (3, 4, 8))
         self.assertEqual(int(counts[0].sum()), 5 * 4 * 2)
         self.assertEqual(int(counts[1].sum()), 3 * 4 * 2)
         self.assertEqual(int(counts[2].sum()), 2 * 4 * 2)
+
+    def test_duplicate_topk_can_be_soft_accepted(self) -> None:
+        routes = np.zeros((2, 6, 2), dtype=np.uint8)
+        for layer in self.topology.moe_layer_indices:
+            routes[0, layer] = [1, 1]
+            routes[1, layer] = [2, 3]
+        with self.assertRaisesRegex(ValueError, "not unique"):
+            validate_routes(routes, self.topology, prompt_tokens=1, completion_tokens=2)
+        summary = validate_routes(
+            routes,
+            self.topology,
+            prompt_tokens=1,
+            completion_tokens=2,
+            require_unique_topk=False,
+        )
+        self.assertFalse(summary["unique_topk"])
+        self.assertGreater(summary["uniqueness"]["total"]["duplicate_cell_fraction"], 0.0)
 
     def test_dense_layer_nonzero_is_rejected(self) -> None:
         routes = np.zeros((1, 6, 2), dtype=np.uint8)

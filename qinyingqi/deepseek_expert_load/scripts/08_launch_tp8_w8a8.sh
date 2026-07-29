@@ -51,8 +51,15 @@ docker image inspect "${IMAGE_REF}" >/dev/null 2>&1 || \
     die "Docker image is absent: ${IMAGE_REF}"
 IMAGE_PATCH_ID="$(docker image inspect "${IMAGE_REF}" \
     --format '{{if .Config.Labels}}{{index .Config.Labels "deepseek.capture_patch_id"}}{{end}}')"
-[[ "${IMAGE_PATCH_ID}" == "${CAPTURE_PATCH_ID}" ]] || \
-    die "route-capture image label mismatch: expected ${CAPTURE_PATCH_ID}, got ${IMAGE_PATCH_ID:-<empty>}"
+case "${IMAGE_PATCH_ID}" in
+    deepseek-v4-w8a8-logical-topk-v4|deepseek-v4-w8a8-logical-topk-v5) ;;
+    *)
+        die "route-capture image label unsupported: expected deepseek-v4-w8a8-logical-topk-v4|v5, got ${IMAGE_PATCH_ID:-<empty>}"
+        ;;
+esac
+if [[ "${IMAGE_PATCH_ID}" != "${CAPTURE_PATCH_ID}" ]]; then
+    warn "CAPTURE_PATCH_ID=${CAPTURE_PATCH_ID} differs from image label ${IMAGE_PATCH_ID}; continuing with image label"
+fi
 if ss -H -ltn "sport = :${API_PORT}" | grep -q .; then
     die "API port is already in use: ${API_PORT}"
 fi
@@ -126,10 +133,14 @@ targets = [Path(root) / "quantization/methods/w8a8_dynamic.py" for root in roots
 targets = [path for path in targets if path.is_file()]
 if len(targets) != 1:
     raise SystemExit(f"expected one installed w8a8_dynamic.py, got {targets}")
-marker_count = targets[0].read_text(encoding="utf-8").count(
+marker_count_v5 = targets[0].read_text(encoding="utf-8").count(
+    "# DEEPSEEK_V4_W8A8_ROUTE_CAPTURE_V5"
+)
+marker_count_v4 = targets[0].read_text(encoding="utf-8").count(
     "# DEEPSEEK_V4_W8A8_ROUTE_CAPTURE_V4"
 )
-print(f"route_capture_marker_count={marker_count}")
+marker_count = marker_count_v5 + marker_count_v4
+print(f"route_capture_marker_count={marker_count} v5={marker_count_v5} v4={marker_count_v4}")
 if marker_count != 1:
     raise SystemExit("W8A8 route-capture hook is absent or duplicated")
 vllm_spec = find_spec("vllm")
@@ -139,8 +150,10 @@ capture_targets = [path for path in capture_targets if path.is_file()]
 if len(capture_targets) != 1:
     raise SystemExit(f"expected one active vLLM routed-experts capture source file, got {capture_targets}")
 capture_source = capture_targets[0].read_text(encoding="utf-8")
-capture_marker_count = capture_source.count("# DEEPSEEK_V4_VLLM_TP8_CAPTURE_GATHER_V4")
-print(f"tp8_capture_gather_marker_count={capture_marker_count}")
+capture_marker_count_v5 = capture_source.count("# DEEPSEEK_V4_VLLM_TP8_CAPTURE_GATHER_V5")
+capture_marker_count_v4 = capture_source.count("# DEEPSEEK_V4_VLLM_TP8_CAPTURE_GATHER_V4")
+capture_marker_count = capture_marker_count_v5 + capture_marker_count_v4
+print(f"tp8_capture_gather_marker_count={capture_marker_count} v5={capture_marker_count_v5} v4={capture_marker_count_v4}")
 if capture_marker_count != 1:
     raise SystemExit("TP8 capture-gather hook is absent or duplicated")
 if "get_tp_group().all_gather(topk_ids, dim=0)" not in capture_source:
@@ -267,7 +280,10 @@ DOCKER_ARGS+=(
     -e ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
     -e VLLM_VERSION=0.22.1
     -e VLLM_WORKER_MULTIPROC_METHOD=spawn
-    -e VLLM_ASCEND_ENABLE_FLASHCOMM1=1
+    # Expert-route capture needs FLASHCOMM1/SP off. With SP on and DP=1,
+    # each TP rank only sees a token shard; padding zeros become duplicate
+    # expert-0 IDs and smoke fails with "top-k expert IDs are not unique".
+    -e VLLM_ASCEND_ENABLE_FLASHCOMM1=0
     -e VLLM_ASCEND_ENABLE_FUSED_MC2=0
     -e OMP_PROC_BIND=false
     -e OMP_NUM_THREADS=10
@@ -304,7 +320,7 @@ SERVICE_ARGS=(
     --no-enable-prefix-caching
     --safetensors-load-strategy prefetch
     --model-loader-extra-config '{"enable_multithread_load":"true","num_threads":128}'
-    --additional-config '{"enable_balance_scheduling":false,"enable_fused_mc2":0,"eplb_config":{"dynamic_eplb":false,"num_redundant_experts":0}}'
+    --additional-config '{"enable_flashcomm1":false,"enable_balance_scheduling":false,"enable_fused_mc2":0,"eplb_config":{"dynamic_eplb":false,"num_redundant_experts":0}}'
 )
 
 write_shell_command "${RUN_DIR}/launch.command.sh" \

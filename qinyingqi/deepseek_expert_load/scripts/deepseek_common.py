@@ -136,11 +136,42 @@ def decode_routed_experts(encoded: str) -> "np.ndarray":
     return routes
 
 
+def _phase_duplicate_stats(
+    moe_routes: "np.ndarray",
+    top_k: int,
+) -> dict[str, Any]:
+    import numpy as np
+
+    if moe_routes.size == 0 or top_k <= 1:
+        return {
+            "rows": 0,
+            "duplicate_cells": 0,
+            "duplicate_cell_fraction": 0.0,
+            "all_zero_cells": 0,
+            "all_zero_cell_fraction": 0.0,
+        }
+    sorted_topk = np.sort(moe_routes, axis=-1)
+    duplicate_mask = np.any(np.diff(sorted_topk, axis=-1) <= 0, axis=-1)
+    all_zero_mask = np.all(moe_routes == 0, axis=-1)
+    cells = int(duplicate_mask.size)
+    duplicate_cells = int(duplicate_mask.sum())
+    all_zero_cells = int(all_zero_mask.sum())
+    return {
+        "rows": int(moe_routes.shape[0]),
+        "duplicate_cells": duplicate_cells,
+        "duplicate_cell_fraction": duplicate_cells / cells if cells else 0.0,
+        "all_zero_cells": all_zero_cells,
+        "all_zero_cell_fraction": all_zero_cells / cells if cells else 0.0,
+    }
+
+
 def validate_routes(
     routes: "np.ndarray",
     topology: ModelTopology,
     prompt_tokens: int,
     completion_tokens: int,
+    *,
+    require_unique_topk: bool = True,
 ) -> dict[str, Any]:
     import numpy as np
 
@@ -167,9 +198,30 @@ def validate_routes(
             f"expert IDs must be in [0, {topology.num_experts - 1}], "
             f"got [{minimum}, {maximum}]"
         )
-    sorted_topk = np.sort(moe_routes, axis=-1)
-    if topology.top_k > 1 and not np.all(np.diff(sorted_topk, axis=-1) > 0):
-        raise ValueError("top-k expert IDs are not unique for every token/layer")
+
+    prefill = moe_routes[:prompt_tokens]
+    decode = moe_routes[prompt_tokens:]
+    uniqueness = {
+        "unique_topk": True,
+        "total": _phase_duplicate_stats(moe_routes, topology.top_k),
+        "prefill": _phase_duplicate_stats(prefill, topology.top_k),
+        "decode": _phase_duplicate_stats(decode, topology.top_k),
+    }
+    if topology.top_k > 1:
+        sorted_topk = np.sort(moe_routes, axis=-1)
+        uniqueness["unique_topk"] = bool(np.all(np.diff(sorted_topk, axis=-1) > 0))
+        if require_unique_topk and not uniqueness["unique_topk"]:
+            raise ValueError(
+                "top-k expert IDs are not unique for every token/layer; "
+                f"duplicate_cell_fraction="
+                f"{uniqueness['total']['duplicate_cell_fraction']:.4f}, "
+                f"all_zero_cell_fraction="
+                f"{uniqueness['total']['all_zero_cell_fraction']:.4f}, "
+                f"prefill_dup={uniqueness['prefill']['duplicate_cell_fraction']:.4f}, "
+                f"decode_dup={uniqueness['decode']['duplicate_cell_fraction']:.4f}. "
+                "Relaunch with FLASHCOMM1/SP disabled, or pass "
+                "--allow-duplicate-topk to continue collecting raw routes."
+            )
 
     return {
         "shape": list(routes.shape),
@@ -184,6 +236,8 @@ def validate_routes(
         "unique_route_tuples": int(
             np.unique(moe_routes.reshape(-1, topology.top_k), axis=0).shape[0]
         ),
+        "unique_topk": uniqueness["unique_topk"],
+        "uniqueness": uniqueness,
     }
 
 
