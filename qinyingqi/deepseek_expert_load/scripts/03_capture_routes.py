@@ -130,6 +130,7 @@ def extract_response(
         require_unique_topk=require_unique_topk,
         unique_scope=unique_scope,
     )
+    aligned = summary.pop("aligned_routes", routes)
     if summary["covered_experts"] <= topology.top_k or summary["unique_route_tuples"] <= 1:
         raise ValueError("routes are constant or stale across the request")
     summary.update(
@@ -139,7 +140,7 @@ def extract_response(
             "usage": usage,
         }
     )
-    return routes, summary
+    return aligned, summary
 
 
 def safe_stem(request_id: str, index: int) -> str:
@@ -226,6 +227,7 @@ def rebuild_aggregate(
             require_unique_topk=require_unique_topk,
             unique_scope=unique_scope,
         )
+        # Drop non-JSON aligned tensor if present.
         counts += count_assignments(routes, topology, prompt)
         prompt_tokens += prompt
         completion_tokens += completion
@@ -452,6 +454,9 @@ def main() -> int:
                     "unique_topk": route_summary.get("unique_topk", True),
                     "unique_topk_decode": route_summary.get("unique_topk_decode", True),
                     "unique_scope": unique_scope,
+                    "shape_repaired": bool(
+                        route_summary.get("shape_repair", {}).get("repaired")
+                    ),
                 },
                 sort_keys=True,
             ),

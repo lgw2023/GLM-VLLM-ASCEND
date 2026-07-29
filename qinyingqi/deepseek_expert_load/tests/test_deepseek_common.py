@@ -87,6 +87,37 @@ class DeepSeekCommonTests(unittest.TestCase):
         self.assertFalse(summary["unique_topk"])
         self.assertTrue(summary["unique_topk_decode"])
 
+    def test_decode_scope_repairs_short_route_tensor(self) -> None:
+        # Usage implies 5 rows; capture only returned 3 (1 prefill shard + 2 decode).
+        routes = np.zeros((3, 6, 2), dtype=np.uint8)
+        for layer in self.topology.moe_layer_indices:
+            routes[0, layer] = [1, 2]
+            routes[1, layer] = [3, 4]
+            routes[2, layer] = [5, 6]
+        with self.assertRaisesRegex(ValueError, "shape mismatch"):
+            validate_routes(
+                routes,
+                self.topology,
+                prompt_tokens=3,
+                completion_tokens=3,
+                unique_scope="all",
+            )
+        summary = validate_routes(
+            routes,
+            self.topology,
+            prompt_tokens=3,
+            completion_tokens=3,
+            unique_scope="decode",
+        )
+        self.assertTrue(summary["shape_repair"]["repaired"])
+        self.assertEqual(summary["shape"], [5, 6, 2])
+        self.assertFalse(summary["shape_repair"]["prefill_trusted"])
+        aligned = summary["aligned_routes"]
+        layer0 = self.topology.moe_layer_indices[0]
+        self.assertTrue(np.array_equal(aligned[3, layer0], [3, 4]))
+        self.assertTrue(np.array_equal(aligned[4, layer0], [5, 6]))
+        self.assertTrue(summary["unique_topk_decode"])
+
     def test_dense_layer_nonzero_is_rejected(self) -> None:
         routes = np.zeros((1, 6, 2), dtype=np.uint8)
         routes[0, 0] = [1, 2]

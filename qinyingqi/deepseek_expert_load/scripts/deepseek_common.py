@@ -165,6 +165,79 @@ def _phase_duplicate_stats(
     }
 
 
+def align_routes_to_usage(
+    routes: "np.ndarray",
+    topology: ModelTopology,
+    prompt_tokens: int,
+    completion_tokens: int,
+    *,
+    unique_scope: str = "all",
+) -> tuple["np.ndarray", dict[str, Any]]:
+    """Normalize routed-expert rows to prompt+completion-1.
+
+    Ascend All2All TP-split often returns a shorter tensor than the chat
+    usage counts imply: only a prefill shard plus decode rows survive. In
+    decode-tolerant modes, left-pad missing prefill rows with zeros and keep
+    the trailing decode rows.
+    """
+    import numpy as np
+
+    expected_rows = prompt_tokens + completion_tokens - 1
+    expected_tail = (topology.num_hidden_layers, topology.top_k)
+    if routes.ndim != 3 or tuple(routes.shape[1:]) != expected_tail:
+        raise ValueError(
+            f"route trailing shape mismatch: expected (*, {expected_tail[0]}, "
+            f"{expected_tail[1]}), got {routes.shape}"
+        )
+    if not np.issubdtype(routes.dtype, np.integer):
+        raise ValueError(f"route dtype must be integer, got {routes.dtype}")
+
+    repair: dict[str, Any] = {
+        "expected_rows": expected_rows,
+        "raw_rows": int(routes.shape[0]),
+        "repaired": False,
+        "prefill_trusted": True,
+        "decode_trusted": True,
+    }
+    if routes.shape[0] == expected_rows:
+        return routes, repair
+
+    decode_rows = completion_tokens - 1
+    if unique_scope == "all":
+        raise ValueError(
+            f"route shape mismatch: expected {(expected_rows, *expected_tail)}, "
+            f"got {routes.shape}. Prefill row loss under Ascend TP-split is "
+            "common; use --unique-scope decode or rebuild the v6 capture image."
+        )
+    if routes.shape[0] < decode_rows:
+        raise ValueError(
+            f"route tensor too short for decode rows: need >= {decode_rows}, "
+            f"got {routes.shape[0]}"
+        )
+    if routes.shape[0] > expected_rows:
+        raise ValueError(
+            f"route tensor longer than usage implies: expected {expected_rows}, "
+            f"got {routes.shape[0]}"
+        )
+
+    # Short tensor: keep trailing decode rows, left-pad prefill with zeros.
+    aligned = np.zeros((expected_rows, *expected_tail), dtype=routes.dtype)
+    raw_prefill = int(routes.shape[0] - decode_rows)
+    if raw_prefill > 0:
+        aligned[prompt_tokens - raw_prefill : prompt_tokens] = routes[:raw_prefill]
+    if decode_rows > 0:
+        aligned[prompt_tokens:] = routes[-decode_rows:]
+    repair.update(
+        {
+            "repaired": True,
+            "prefill_trusted": False,
+            "raw_prefill_rows": raw_prefill,
+            "padded_prefill_rows": prompt_tokens - raw_prefill,
+        }
+    )
+    return aligned, repair
+
+
 def validate_routes(
     routes: "np.ndarray",
     topology: ModelTopology,
@@ -180,12 +253,18 @@ def validate_routes(
         raise ValueError("prompt and completion token counts must be positive")
     if unique_scope not in {"all", "decode", "none"}:
         raise ValueError("unique_scope must be one of: all, decode, none")
+
+    routes, repair = align_routes_to_usage(
+        routes,
+        topology,
+        prompt_tokens,
+        completion_tokens,
+        unique_scope=unique_scope,
+    )
     expected_rows = prompt_tokens + completion_tokens - 1
     expected_shape = (expected_rows, topology.num_hidden_layers, topology.top_k)
     if routes.shape != expected_shape:
-        raise ValueError(f"route shape mismatch: expected {expected_shape}, got {routes.shape}")
-    if not np.issubdtype(routes.dtype, np.integer):
-        raise ValueError(f"route dtype must be integer, got {routes.dtype}")
+        raise ValueError(f"route shape mismatch after align: expected {expected_shape}, got {routes.shape}")
 
     dense_layers = topology.dense_layer_indices
     if dense_layers and not np.all(routes[:, dense_layers, :] == 0):
@@ -238,10 +317,18 @@ def validate_routes(
                     f"{uniqueness['total']['all_zero_cell_fraction']:.4f}, "
                     f"prefill_dup={uniqueness['prefill']['duplicate_cell_fraction']:.4f}, "
                     f"decode_dup={uniqueness['decode']['duplicate_cell_fraction']:.4f}. "
-                    "Prefill zeros with clean decode usually mean Ascend All2All "
-                    "TP-split (independent of FLASHCOMM1). Rebuild the v6 capture "
-                    "image, or pass --unique-scope decode / --allow-duplicate-topk."
+                    "Prefill zeros/short tensors with clean decode usually mean "
+                    "Ascend All2All TP-split. Rebuild the v6 capture image, or "
+                    "pass --unique-scope decode / --allow-duplicate-topk."
                 )
+
+    # For decode-trusted mode, diversity checks must look at decode only when
+    # prefill was zero-padded or truncated by TP-split.
+    diversity_routes = decode if unique_scope == "decode" and decode.size else moe_routes
+    covered_experts = int(np.unique(diversity_routes).size)
+    unique_route_tuples = int(
+        np.unique(diversity_routes.reshape(-1, topology.top_k), axis=0).shape[0]
+    )
 
     return {
         "shape": list(routes.shape),
@@ -252,13 +339,13 @@ def validate_routes(
         "decode_rows": completion_tokens - 1,
         "minimum_expert_id": minimum,
         "maximum_expert_id": maximum,
-        "covered_experts": int(np.unique(moe_routes).size),
-        "unique_route_tuples": int(
-            np.unique(moe_routes.reshape(-1, topology.top_k), axis=0).shape[0]
-        ),
+        "covered_experts": covered_experts,
+        "unique_route_tuples": unique_route_tuples,
         "unique_topk": uniqueness["unique_topk"],
         "unique_topk_decode": uniqueness.get("unique_topk_decode", uniqueness["unique_topk"]),
         "uniqueness": uniqueness,
+        "shape_repair": repair,
+        "aligned_routes": routes,
     }
 
 
