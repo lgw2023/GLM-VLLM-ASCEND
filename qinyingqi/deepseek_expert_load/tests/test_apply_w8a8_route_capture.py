@@ -139,7 +139,7 @@ class W8A8RouteCapturePatchTests(unittest.TestCase):
         self.assertIn("model.modules()", model_runner)
 
         self.assertEqual(capture.count(PATCHER.CAPTURE_PATCH_MARKER), 1)
-        self.assertIn("Pre-prepare capture", capture)
+        self.assertIn("pre-prepare capture", capture)
         self.assertIn("DEEPSEEK_ROUTE_CAPTURE_DIAG capturer_write", capture)
         self.assertIn("capturer_gather", capture)
         self.assertIn("dist.all_gather", capture)

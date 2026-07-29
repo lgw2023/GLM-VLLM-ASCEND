@@ -240,7 +240,7 @@ CAPTURE_ANCHOR = (
 CAPTURE_REPLACEMENT = (
     "        ctx = get_forward_context()\n"
     "        # DEEPSEEK_V4_VLLM_TP8_CAPTURE_GATHER_V9\n"
-    "        # Pre-prepare capture may still pass TP-local shards when DP=1.\n"
+    "        # pre-prepare capture may still pass TP-local shards when DP=1.\n"
     "        # DEEPSEEK_ROUTE_CAPTURE_DIAG: see buffer-write dump below.\n"
     "        if ctx.dp_metadata is None:  # single dp\n"
     "            n = topk_ids.shape[0]\n"
