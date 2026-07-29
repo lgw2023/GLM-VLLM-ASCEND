@@ -416,12 +416,7 @@ def patch_model_runner_source(source: str) -> str:
         raise RuntimeError("DeepSeek model-runner bind patch is already present")
     if source.count(MODEL_RUNNER_BIND_ANCHOR) != 1:
         raise RuntimeError("unexpected model_runner bind anchor is not unique")
-    if source.count(MODEL_RUNNER_EARLY_INIT_ANCHOR) != 1:
-        raise RuntimeError("unexpected model_runner load_model anchor is not unique")
     patched = source.replace(MODEL_RUNNER_BIND_ANCHOR, MODEL_RUNNER_BIND_REPLACEMENT, 1)
-    patched = patched.replace(MODEL_RUNNER_EARLY_INIT_ANCHOR, MODEL_RUNNER_EARLY_INIT_REPLACEMENT, 1)
-    if MODEL_RUNNER_REMOVE_LATE_INIT_ANCHOR in patched:
-        patched = patched.replace(MODEL_RUNNER_REMOVE_LATE_INIT_ANCHOR, MODEL_RUNNER_REMOVE_LATE_INIT_REPLACEMENT, 1)
     compile(patched, MODEL_RUNNER_TARGET_RELATIVE_PATH, "exec")
     return patched
 
@@ -474,8 +469,6 @@ def verify_model_runner_source(source: str) -> None:
         raise RuntimeError("model-runner bind diagnostic log is absent")
     if "AscendFusedMoE._ds_global_route_capturer = capturer" not in source:
         raise RuntimeError("model-runner global capturer fallback is absent")
-    if "init_routed_experts_capturer()" not in source.split("def load_model", 1)[1].split("def _start_dump_data", 1)[0]:
-        raise RuntimeError("model-runner early capturer init is absent")
     if (
         "        if has_kv_transfer_group() and not is_profiling:\n"
         "            get_kv_transfer_group().register_kv_caches(kv_caches)\n"
