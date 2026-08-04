@@ -1,0 +1,15 @@
+ARG BASE_IMAGE=quay.io/ascend/vllm-ascend:v0.22.1rc1
+FROM ${BASE_IMAGE}
+
+ARG BASE_IMAGE
+ARG CAPTURE_PATCH_ID=glm51-w4a8-logical-topk-v2
+
+LABEL glm51.capture_patch_id="${CAPTURE_PATCH_ID}" \
+      glm51.capture_base_image="${BASE_IMAGE}" \
+      glm51.capture_target="vllm-ascend-v0.22.1rc1-glm51-w4a8"
+
+COPY apply_route_capture.py /tmp/apply_route_capture.py
+
+RUN python /tmp/apply_route_capture.py \
+    && python /tmp/apply_route_capture.py --verify \
+    && rm -f /tmp/apply_route_capture.py

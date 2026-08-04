@@ -1,0 +1,4 @@
+configs/node3.env
+__pycache__/
+*.pyc
+

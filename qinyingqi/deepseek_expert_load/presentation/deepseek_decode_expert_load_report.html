@@ -1,0 +1,976 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>DeepSeek-V4 Decode 阶段 Expert 负载分析 · 技术评审</title>
+  <style>
+    :root {
+      --red-title: #b00000;
+      --blue-emphasis: #0033cc;
+      --risk-red: #c00000;
+      --border: #666;
+      --border-light: #999;
+      --header-bg: #f5f0d8;
+      --module-green: #eef6ee;
+      --module-gray: #f4f4f4;
+      --text: #111;
+      --muted: #444;
+      --footer: #666;
+      --slide-w: 1280px;
+      --slide-h: 720px;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: "Microsoft YaHei", Arial, sans-serif;
+      background: #d8d8d8;
+      color: var(--text);
+      overflow: hidden;
+    }
+
+    .deck {
+      width: 100vw;
+      height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      position: relative;
+    }
+
+    .slide {
+      width: var(--slide-w);
+      height: var(--slide-h);
+      background: #fff;
+      border: 1px solid var(--border);
+      display: none;
+      flex-direction: column;
+      padding: 28px 34px 18px;
+      transform-origin: center center;
+      position: relative;
+    }
+
+    .slide.active { display: flex; }
+
+    .title-bar {
+      border-bottom: 2px solid var(--red-title);
+      padding-bottom: 10px;
+      margin-bottom: 14px;
+    }
+
+    .title-bar h1 {
+      color: var(--red-title);
+      font-size: 30px;
+      line-height: 1.25;
+      font-weight: 700;
+    }
+
+    .title-bar .subtitle {
+      margin-top: 6px;
+      font-size: 14px;
+      color: var(--muted);
+    }
+
+    .content {
+      flex: 1;
+      display: grid;
+      gap: 12px;
+      min-height: 0;
+      overflow: hidden;
+    }
+
+    .grid-2 { grid-template-columns: 1fr 1fr; }
+    .grid-3 { grid-template-columns: 1fr 1fr 1fr; }
+    .grid-2-1 { grid-template-columns: 1.2fr 0.8fr; }
+
+    .module {
+      border: 1px solid var(--border-light);
+      padding: 10px 12px;
+      min-height: 0;
+      overflow: hidden;
+      background: #fff;
+    }
+
+    .module.gray { background: var(--module-gray); }
+    .module.green { background: var(--module-green); }
+
+    .module h2 {
+      font-size: 18px;
+      color: var(--red-title);
+      margin-bottom: 8px;
+      border-left: 4px solid var(--red-title);
+      padding-left: 8px;
+    }
+
+    .module h3 {
+      font-size: 14px;
+      margin: 8px 0 4px;
+      color: #000;
+    }
+
+    .highlight {
+      color: var(--blue-emphasis);
+      font-weight: 700;
+    }
+
+    .risk {
+      color: var(--risk-red);
+      font-weight: 700;
+    }
+
+    .placeholder {
+      background: #fff8dc;
+      border: 1px dashed #c9a227;
+      color: #7a5b00;
+      padding: 1px 6px;
+      font-weight: 700;
+      white-space: nowrap;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 12px;
+      margin-top: 4px;
+    }
+
+    th, td {
+      border: 1px solid var(--border-light);
+      padding: 5px 6px;
+      text-align: left;
+      vertical-align: top;
+    }
+
+    th {
+      background: var(--header-bg);
+      font-weight: 700;
+    }
+
+    ul, ol {
+      margin-left: 18px;
+      font-size: 13px;
+      line-height: 1.45;
+    }
+
+    li { margin: 3px 0; }
+
+    .bullets-compact li { font-size: 12px; }
+
+    .summary-bar {
+      border-top: 1px solid var(--border);
+      margin-top: 10px;
+      padding-top: 8px;
+      display: grid;
+      grid-template-columns: 70px 1fr;
+      gap: 10px;
+      font-size: 12px;
+    }
+
+    .summary-bar .label {
+      color: var(--red-title);
+      font-weight: 700;
+      font-size: 14px;
+    }
+
+    .footer {
+      margin-top: auto;
+      border-top: 1px solid var(--border-light);
+      padding-top: 6px;
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      font-size: 10px;
+      color: var(--footer);
+    }
+
+    .footer .center { text-align: center; }
+    .footer .right { text-align: right; }
+
+    .arch {
+      display: grid;
+      grid-template-columns: repeat(5, 1fr);
+      gap: 8px;
+      margin-top: 8px;
+    }
+
+    .arch-box {
+      border: 1px solid var(--border);
+      background: var(--module-gray);
+      text-align: center;
+      padding: 10px 6px;
+      font-size: 12px;
+      min-height: 72px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .arch-arrow {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 18px;
+      color: var(--blue-emphasis);
+    }
+
+    .timeline {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 8px;
+      margin-top: 8px;
+    }
+
+    .timeline-item {
+      border: 1px solid var(--border-light);
+      padding: 8px;
+      font-size: 12px;
+      background: #fff;
+    }
+
+    .timeline-item strong {
+      display: block;
+      color: var(--red-title);
+      margin-bottom: 4px;
+    }
+
+    .chart-box {
+      border: 1px solid var(--border-light);
+      height: 180px;
+      margin-top: 6px;
+      position: relative;
+      background: #fafafa;
+    }
+
+    .chart-box .axis-label {
+      position: absolute;
+      font-size: 10px;
+      color: var(--muted);
+    }
+
+    .bar-chart {
+      display: flex;
+      align-items: flex-end;
+      justify-content: space-around;
+      height: 140px;
+      padding: 0 12px 18px;
+      margin-top: 18px;
+    }
+
+    .bar {
+      width: 14%;
+      background: #8aa9d8;
+      border: 1px solid #4a6fa5;
+      position: relative;
+    }
+
+    .bar.hot { background: #d9534f; border-color: #a94442; }
+    .bar-label {
+      position: absolute;
+      bottom: -16px;
+      left: 50%;
+      transform: translateX(-50%);
+      font-size: 10px;
+      white-space: nowrap;
+    }
+
+    .cover {
+      justify-content: center;
+      align-items: center;
+      text-align: center;
+    }
+
+    .cover h1 {
+      color: var(--red-title);
+      font-size: 40px;
+      line-height: 1.3;
+      margin-bottom: 18px;
+    }
+
+    .cover .meta {
+      font-size: 16px;
+      color: var(--muted);
+      line-height: 1.8;
+    }
+
+    .cover .tagline {
+      margin-top: 28px;
+      font-size: 18px;
+      color: var(--blue-emphasis);
+      font-weight: 700;
+    }
+
+    .nav-hint {
+      position: fixed;
+      right: 16px;
+      bottom: 12px;
+      background: rgba(255,255,255,0.92);
+      border: 1px solid var(--border-light);
+      padding: 6px 10px;
+      font-size: 11px;
+      color: var(--muted);
+      z-index: 10;
+    }
+
+    @media print {
+      body { background: #fff; overflow: visible; }
+      .deck { display: block; height: auto; }
+      .slide {
+        display: flex !important;
+        page-break-after: always;
+        transform: none !important;
+        margin: 0 auto 20px;
+      }
+      .nav-hint { display: none; }
+    }
+  </style>
+</head>
+<body>
+  <div class="deck" id="deck">
+
+    <!-- Slide 1 -->
+    <section class="slide active cover" data-page="1">
+      <h1>DeepSeek-V4 Decode 阶段<br/>MoE Expert 负载分布技术评审</h1>
+      <div class="meta">
+        平台：Ascend 910B1 × 8 · vLLM-Ascend W8A8 · TP=8 / EP=on<br/>
+        工作负载：MMLU-Pro / SWE-bench Lite / LiveCodeBench / RULER-NIAH<br/>
+        分析相位：<span class="highlight">Decode only</span>（Prefill 路由在 Ascend TP-split 下不可信）
+      </div>
+      <div class="tagline">验证命题：约 20% Expert 是否承担约 90% 的 token assignment？</div>
+      <div class="footer" style="width:100%; margin-top:48px;">
+        <div>PROJECT / TECHNOLOGY REVIEW</div>
+        <div class="center">Internal Technical Analysis</div>
+        <div class="right">Page 1</div>
+      </div>
+    </section>
+
+    <!-- Slide 2 -->
+    <section class="slide" data-page="2">
+      <div class="title-bar">
+        <h1>关键问题总览：Decode 负载可信，Prefill 采集仍是 Ascend TP 瓶颈</h1>
+        <div class="subtitle">本轮汇报聚焦已跑通的 decode-phase expert load，不将 prefill 结论用于 HBM 放置决策</div>
+      </div>
+      <div class="content grid-2">
+        <div class="module">
+          <h2>技术挑战</h2>
+          <table>
+            <tr><th>问题</th><th>影响</th><th>数据依据</th><th>当前策略</th></tr>
+            <tr>
+              <td>Ascend All2All MoE 在 TP&gt;1 时对 prefill token 做 tensor_split</td>
+              <td class="risk">prefill 路由出现大量 0 / duplicate top-k</td>
+              <td>prefill_dup≈0.7+，decode_dup=0.0</td>
+              <td class="highlight">仅统计 decode 相位</td>
+            </tr>
+            <tr>
+              <td>固定较短 max_tokens 可能截断 CoT</td>
+              <td>decode 样本代表性不足</td>
+              <td>completion_tokens 分布偏短</td>
+              <td>拉长 decode 上限，关注 EOS 行为</td>
+            </tr>
+            <tr>
+              <td>不同 benchmark 任务域差异大</td>
+              <td>专家热点可能随任务迁移</td>
+              <td>跨 benchmark JSD / Jaccard</td>
+              <td>分 benchmark 汇报 + 成对比较</td>
+            </tr>
+          </table>
+        </div>
+        <div class="module gray">
+          <h2>本轮实验边界</h2>
+          <ul>
+            <li>模型：<strong>DeepSeek-V4-Flash W8A8</strong>，约 279 GiB，logical routed experts = <span class="placeholder">{{NUM_EXPERTS}}</span></li>
+            <li>Top-K：<span class="placeholder">{{TOP_K}}</span>；MoE 层数：<span class="placeholder">{{NUM_MOE_LAYERS}}</span></li>
+            <li>服务：<span class="placeholder">{{RUN_ID}}</span> · API <span class="placeholder">{{API_ENDPOINT}}</span></li>
+            <li>采集模式：<span class="highlight">unique-scope=decode</span>，状态 <span class="placeholder">{{CAPTURE_STATUS}}</span></li>
+            <li>请求规模：每 benchmark <span class="placeholder">{{MAX_REQUESTS}}</span> 条 · decode 上限 <span class="placeholder">{{MAX_TOKENS}}</span> tokens</li>
+          </ul>
+          <h3>工程判断</h3>
+          <ol class="bullets-compact">
+            <li>Decode 路由通过唯一性校验，可作为负载统计主数据源。</li>
+            <li>Prefill 在 v9 前仍受 TP-split 污染，<span class="risk">不得</span>与 decode 合并解读。</li>
+            <li>报告中的 total / prefill 行仅作结构展示，结论只看 decode 行。</li>
+          </ol>
+        </div>
+      </div>
+      <div class="summary-bar">
+        <div class="label">总结</div>
+        <ul>
+          <li>核心命题可在 <strong>decode 相位</strong> 上验证，不必等待 prefill 修复。</li>
+          <li>Ascend TP=8 是部署硬约束，问题来自 MoE 通信切分，不是 FLASHCOMM1 配置错误。</li>
+          <li>汇报材料应明确“decode-trusted”合同，避免误读 total 相位数字。</li>
+        </ul>
+      </div>
+      <div class="footer">
+        <div>PROJECT / TECHNOLOGY REVIEW</div>
+        <div class="center">Internal Technical Analysis</div>
+        <div class="right">Page 2</div>
+      </div>
+    </section>
+
+    <!-- Slide 3 -->
+    <section class="slide" data-page="3">
+      <div class="title-bar">
+        <h1>研究假设：DeepSeek MoE 在真实任务上呈现高集中度的 Expert 负载偏斜</h1>
+        <div class="subtitle">验证目标不是官方 benchmark 分数，而是 routed expert assignment 的统计结构</div>
+      </div>
+      <div class="content grid-3">
+        <div class="module green">
+          <h2>主假设 H1</h2>
+          <p style="font-size:13px;">在每个 MoE 层，<span class="highlight">top 20% experts</span> 承担 <span class="highlight">≥ 90%</span> 的 token assignments。</p>
+          <h3>对应指标</h3>
+          <ul class="bullets-compact">
+            <li>per_layer_top20_share_mean</li>
+            <li>layers_top20_ge_90_fraction</li>
+          </ul>
+        </div>
+        <div class="module">
+          <h2>辅假设 H2</h2>
+          <p style="font-size:13px;">不同 benchmark 的热点 expert 集合存在显著差异，任务域会改变路由分布。</p>
+          <h3>对应指标</h3>
+          <ul class="bullets-compact">
+            <li>pairwise JSD（bits）</li>
+            <li>top-20% Jaccard overlap</li>
+          </ul>
+        </div>
+        <div class="module gray">
+          <h2>部署含义 H3</h2>
+          <p style="font-size:13px;">若 H1 成立，则静态 HBM 放置、冗余 expert 预算、EPLB 策略可围绕热点 expert 优化。</p>
+          <h3>需要的数据</h3>
+          <ul class="bullets-compact">
+            <li>decode assignments 总量</li>
+            <li>每层 top expert ID 排名</li>
+            <li>跨任务热点稳定性</li>
+          </ul>
+        </div>
+      </div>
+      <div class="content" style="margin-top:12px; grid-template-columns:1fr;">
+        <div class="module">
+          <h2>验证合同（Analysis Contract）</h2>
+          <table>
+            <tr><th>指标层级</th><th>含义</th><th>是否用于 HBM 放置</th><th>本轮状态</th></tr>
+            <tr><td>Per-layer top-20% share</td><td>每层独立统计最热 20% expert 承担的 assignment 比例</td><td class="highlight">是（主指标）</td><td><span class="placeholder">{{FILL_AFTER_ANALYZE}}</span></td></tr>
+            <tr><td>Global layer-expert top-20%</td><td>允许热点在层间迁移的全局 pair 统计</td><td>辅助</td><td><span class="placeholder">{{FILL_AFTER_ANALYZE}}</span></td></tr>
+            <tr><td>Pooled expert-ID metrics</td><td>跨层合并 expert ID（层间不复用权重）</td><td>仅诊断</td><td><span class="placeholder">{{FILL_AFTER_ANALYZE}}</span></td></tr>
+            <tr><td>Phase=decode</td><td>仅统计 prompt 之后每个生成 token 的路由</td><td class="highlight">是</td><td>已启用</td></tr>
+          </table>
+        </div>
+      </div>
+      <div class="summary-bar">
+        <div class="label">总结</div>
+        <ul>
+          <li>汇报主线是“负载是否集中”，不是“模型答题是否正确”。</li>
+          <li>主结论应引用 <strong>decode 相位 + per-layer top-20%</strong> 指标。</li>
+          <li>跨 benchmark 差异用 JSD/Jaccard 支撑“任务域相关”判断。</li>
+        </ul>
+      </div>
+      <div class="footer">
+        <div>PROJECT / TECHNOLOGY REVIEW</div>
+        <div class="center">Internal Technical Analysis</div>
+        <div class="right">Page 3</div>
+      </div>
+    </section>
+
+    <!-- Slide 4 -->
+    <section class="slide" data-page="4">
+      <div class="title-bar">
+        <h1>实验环境：Node1 八卡 Ascend 910B1 部署 DeepSeek-V4-Flash W8A8</h1>
+        <div class="subtitle">单机 TP=8 是显存硬约束；Expert 路由通过 vLLM `--enable-return-routed-experts` 回传</div>
+      </div>
+      <div class="content grid-2-1">
+        <div class="module">
+          <h2>部署拓扑</h2>
+          <div class="arch">
+            <div class="arch-box">Client<br/>capture scripts</div>
+            <div class="arch-arrow">→</div>
+            <div class="arch-box">vLLM API<br/>:7100/v1</div>
+            <div class="arch-arrow">→</div>
+            <div class="arch-box">8×910B1<br/>TP=8 EP=on</div>
+          </div>
+          <table style="margin-top:10px;">
+            <tr><th>项</th><th>配置</th></tr>
+            <tr><td>模型路径</td><td><span class="placeholder">{{MODEL_HOST_PATH}}</span></td></tr>
+            <tr><td>镜像 / Patch</td><td><span class="placeholder">{{IMAGE_REF}}</span> / <span class="placeholder">{{CAPTURE_PATCH_ID}}</span></td></tr>
+            <tr><td>量化</td><td>ModelSlim W8A8，`--quantization ascend`</td></tr>
+            <tr><td>并行</td><td>DP=1, TP=8, EP=on, max-model-len=<span class="placeholder">{{MAX_MODEL_LEN}}</span></td></tr>
+            <tr><td>关闭项</td><td>MTP / async scheduling / prefix caching / EPLB / FLASHCOMM1</td></tr>
+            <tr><td>结果目录</td><td><span class="placeholder">{{RUN_ROOT}}/{{RUN_ID}}</span></td></tr>
+          </table>
+        </div>
+        <div class="module gray">
+          <h2>资源与约束</h2>
+          <ul>
+            <li>权重大小约 <strong>279 GiB</strong>，8×64 GiB 为官方支持拓扑。</li>
+            <li><span class="risk">不可关闭 TP</span>：TP=1 无法容纳 W8A8 全模型。</li>
+            <li>Benchmark 输入来自网络挂载 JSONL，结果写 Node1 本地盘。</li>
+            <li>单请求路由张量 shape：<code>(prompt+completion-1, layers, top_k)</code></li>
+          </ul>
+          <h3>采集链路</h3>
+          <ol class="bullets-compact">
+            <li>`04_run_benchmarks.sh` 调 `03_capture_routes.py`</li>
+            <li>保存 routes / responses / aggregate-counts.npz</li>
+            <li>`05_analyze.sh` 生成 report.md / summary.csv</li>
+          </ol>
+        </div>
+      </div>
+      <div class="summary-bar">
+        <div class="label">总结</div>
+        <ul>
+          <li>实验在真实 Ascend 推理栈上完成，不是离线模拟路由。</li>
+          <li>TP=8 是负载测试的固定前提，不是可随意关闭的变量。</li>
+          <li>所有汇报数字应能回溯到 <span class="placeholder">{{RUN_ID}}</span> 目录。</li>
+        </ul>
+      </div>
+      <div class="footer">
+        <div>PROJECT / TECHNOLOGY REVIEW</div>
+        <div class="center">Internal Technical Analysis</div>
+        <div class="right">Page 4</div>
+      </div>
+    </section>
+
+    <!-- Slide 5 -->
+    <section class="slide" data-page="5">
+      <div class="title-bar">
+        <h1>方案演进：从 Full-Phase 采集失败到 Decode-Trusted 可交付路径</h1>
+        <div class="subtitle">v4–v9 补丁迭代说明：为何最终汇报选择 decode-only</div>
+      </div>
+      <div class="content">
+        <div class="timeline">
+          <div class="timeline-item">
+            <strong>v4–v5</strong>
+            先跑通 benchmark；decode 路由干净，prefill 在 TP-split 后采集。
+            <br/><span class="risk">劣势：</span>prefill 大面积 zero / duplicate。
+          </div>
+          <div class="timeline-item">
+            <strong>v6–v8</strong>
+            尝试在 capturer 内 gather / 在 prepare 前采集。
+            <br/><span class="risk">劣势：</span>prefill 仍不可信；部分请求 capturer 未绑定。
+          </div>
+          <div class="timeline-item">
+            <strong>v9</strong>
+            prepare() 前 select_experts + bind 修复 + TP gather 诊断。
+            <br/><span class="highlight">优势：</span>定位问题清晰；decode 可用于正式分析。
+          </div>
+          <div class="timeline-item">
+            <strong>本轮交付</strong>
+            `--unique-scope decode` 跑完四类 benchmark。
+            <br/><span class="highlight">优势：</span>不阻塞 expert load 结论；可立即汇报。
+          </div>
+        </div>
+        <div class="content grid-2" style="margin-top:12px;">
+          <div class="module">
+            <h2>Prefill 失败机理（Ascend 特有）</h2>
+            <ul class="bullets-compact">
+              <li>`PrepareAndFinalizeWithAll2All` 在 TP&gt;1 时将 prefill token 切到各 rank。</li>
+              <li>若采集点位于 split 之后，仅约 <strong>1/TP</strong> 行是真实 logical route。</li>
+              <li>表现：`all_zero_cell_fraction ≈ duplicate_cell_fraction`，且 decode_dup 仍为 0。</li>
+              <li>这与 FLASHCOMM1=0 不矛盾，是 MoE 通信路径问题。</li>
+            </ul>
+          </div>
+          <div class="module green">
+            <h2>Decode 为什么可信</h2>
+            <ul class="bullets-compact">
+              <li>Decode 每步仅 1 个 token，不会触发 prefill 式 batch split。</li>
+              <li>诊断日志常见：`topk=(1, 6)` 且 `decode_dup=0.0000`。</li>
+              <li>`route-quality.json` 可标记 `routes_trusted_for_decode_load_analysis=true`。</li>
+              <li>对“生成阶段算力如何分配”这一问题，decode 更具代表性。</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+      <div class="summary-bar">
+        <div class="label">总结</div>
+        <ul>
+          <li>不是实验失败，而是 <strong>相位可信度分层</strong>：decode 可交付，prefill 待修复。</li>
+          <li>汇报中必须写清“decode-trusted contract”，避免被质疑数据有效性。</li>
+          <li>后续若 prefill 修复成功，可追加 total-phase 对比作为二期工作。</li>
+        </ul>
+      </div>
+      <div class="footer">
+        <div>PROJECT / TECHNOLOGY REVIEW</div>
+        <div class="center">Internal Technical Analysis</div>
+        <div class="right">Page 5</div>
+      </div>
+    </section>
+
+    <!-- Slide 6 -->
+    <section class="slide" data-page="6">
+      <div class="title-bar">
+        <h1>Benchmark 设计：四类任务覆盖推理、代码、软件工程与长上下文检索</h1>
+        <div class="subtitle">输入为 prepared JSONL workload，不计算官方 leaderboard 分数</div>
+      </div>
+      <div class="content grid-2">
+        <div class="module">
+          <h2>Workload 组成</h2>
+          <table>
+            <tr><th>Benchmark</th><th>任务特征</th><th>Prompt 结构</th><th>样本数</th></tr>
+            <tr>
+              <td>MMLU-Pro</td>
+              <td>多选题知识推理</td>
+              <td>仅 user</td>
+              <td><span class="placeholder">{{REQ_MMLU}}</span></td>
+            </tr>
+            <tr>
+              <td>SWE-bench Lite</td>
+              <td>软件工程诊断 / patch 规划</td>
+              <td><span class="highlight">system + user</span></td>
+              <td><span class="placeholder">{{REQ_SWEBENCH}}</span></td>
+            </tr>
+            <tr>
+              <td>LiveCodeBench</td>
+              <td>算法与代码生成</td>
+              <td>仅 user</td>
+              <td><span class="placeholder">{{REQ_LCB}}</span></td>
+            </tr>
+            <tr>
+              <td>RULER-NIAH</td>
+              <td>长文档needle检索</td>
+              <td>仅 user（长上下文）</td>
+              <td><span class="placeholder">{{REQ_RULER}}</span></td>
+            </tr>
+          </table>
+        </div>
+        <div class="module gray">
+          <h2>采集参数</h2>
+          <table>
+            <tr><th>参数</th><th>值</th><th>说明</th></tr>
+            <tr><td>temperature</td><td>0.0</td><td>确定性生成，便于复现</td></tr>
+            <tr><td>seed</td><td><span class="placeholder">{{SEED}}</span></td><td>固定随机种子</td></tr>
+            <tr><td>max_tokens</td><td><span class="placeholder">{{MAX_TOKENS}}</span></td><td>decode 上限；过短会截断 CoT</td></tr>
+            <tr><td>ignore_eos</td><td>true（当前脚本默认）</td><td>会强制写满上限，需结合 completion 长度解读</td></tr>
+            <tr><td>unique_scope</td><td>decode</td><td>只严格校验 decode top-k 唯一性</td></tr>
+          </table>
+          <h3>数据产物</h3>
+          <ul class="bullets-compact">
+            <li>`benchmarks/*/aggregate-counts.npz`</li>
+            <li>`analysis/report.md`, `summary.csv`, `pairwise.csv`</li>
+          </ul>
+        </div>
+      </div>
+      <div class="summary-bar">
+        <div class="label">总结</div>
+        <ul>
+          <li>四类任务覆盖不同认知负载，足以观察 expert 路由是否随任务域变化。</li>
+          <li>SWE-bench Lite 是唯一带 system prompt 的 benchmark，解释差异时需单独标注。</li>
+          <li>汇报应同时给出请求规模、decode 长度与 trusted 状态。</li>
+        </ul>
+      </div>
+      <div class="footer">
+        <div>PROJECT / TECHNOLOGY REVIEW</div>
+        <div class="center">Internal Technical Analysis</div>
+        <div class="right">Page 6</div>
+      </div>
+    </section>
+
+    <!-- Slide 7 -->
+    <section class="slide" data-page="7">
+      <div class="title-bar">
+        <h1>Decode 负载集中度总览：20% Expert 是否承担 90% Assignment？</h1>
+        <div class="subtitle">以下数值请从 `analysis/report.md` 的 <strong>Phase=decode</strong> 行填入</div>
+      </div>
+      <div class="content grid-2">
+        <div class="module">
+          <h2>分 Benchmark 汇总（Decode）</h2>
+          <table>
+            <tr>
+              <th>Benchmark</th><th>Assignments</th><th>Mean per-layer top-20% share</th>
+              <th>Layers top-20%≥90%</th><th>Mean expert fraction for 90%</th>
+            </tr>
+            <tr>
+              <td>MMLU-Pro</td>
+              <td><span class="placeholder">{{DECODE_ASSIGN_MMLU}}</span></td>
+              <td><span class="placeholder">{{DECODE_TOP20_MMLU}}</span></td>
+              <td><span class="placeholder">{{DECODE_LAYERS90_MMLU}}</span></td>
+              <td><span class="placeholder">{{DECODE_NEED90_MMLU}}</span></td>
+            </tr>
+            <tr>
+              <td>SWE-bench Lite</td>
+              <td><span class="placeholder">{{DECODE_ASSIGN_SWEB}}</span></td>
+              <td><span class="placeholder">{{DECODE_TOP20_SWEB}}</span></td>
+              <td><span class="placeholder">{{DECODE_LAYERS90_SWEB}}</span></td>
+              <td><span class="placeholder">{{DECODE_NEED90_SWEB}}</span></td>
+            </tr>
+            <tr>
+              <td>LiveCodeBench</td>
+              <td><span class="placeholder">{{DECODE_ASSIGN_LCB}}</span></td>
+              <td><span class="placeholder">{{DECODE_TOP20_LCB}}</span></td>
+              <td><span class="placeholder">{{DECODE_LAYERS90_LCB}}</span></td>
+              <td><span class="placeholder">{{DECODE_NEED90_LCB}}</span></td>
+            </tr>
+            <tr>
+              <td>RULER-NIAH</td>
+              <td><span class="placeholder">{{DECODE_ASSIGN_RULER}}</span></td>
+              <td><span class="placeholder">{{DECODE_TOP20_RULER}}</span></td>
+              <td><span class="placeholder">{{DECODE_LAYERS90_RULER}}</span></td>
+              <td><span class="placeholder">{{DECODE_NEED90_RULER}}</span></td>
+            </tr>
+          </table>
+          <p style="font-size:11px; margin-top:6px; color:var(--muted);">
+            主判断：若 Mean per-layer top-20% share ≥ 90%，则支持 H1；若 layers_top20_ge_90_fraction 接近 100%，说明大多数 MoE 层都呈现高集中。
+          </p>
+        </div>
+        <div class="module">
+          <h2>示意图：Per-layer top-20% share（Decode）</h2>
+          <div class="chart-box">
+            <div class="axis-label" style="left:8px; top:6px;">Share (%)</div>
+            <div class="axis-label" style="right:8px; bottom:4px;">Benchmark</div>
+            <div class="bar-chart">
+              <div class="bar" style="height:55%;"><div class="bar-label">MMLU</div></div>
+              <div class="bar hot" style="height:78%;"><div class="bar-label">SWE</div></div>
+              <div class="bar" style="height:62%;"><div class="bar-label">LCB</div></div>
+              <div class="bar" style="height:70%;"><div class="bar-label">RULER</div></div>
+            </div>
+          </div>
+          <p style="font-size:11px; margin-top:6px;">
+            柱状高度为<strong>示意</strong>，请替换为真实值。红色表示当前最值得关注的任务域。
+            建议补充一张真实柱状图：从 `summary.csv` 导入 Excel / PPT。
+          </p>
+          <h3>一句话结论（待填）</h3>
+          <p class="highlight" style="font-size:14px;">
+            <span class="placeholder">{{ONE_LINE_CONCENTRATION_CONCLUSION}}</span>
+          </p>
+        </div>
+      </div>
+      <div class="summary-bar">
+        <div class="label">总结</div>
+        <ul>
+          <li>只引用 <strong>decode</strong> 行，不引用 total / prefill 行做集中度判断。</li>
+          <li>优先报告 per-layer top-20% share 与 layers_top20_ge_90_fraction。</li>
+          <li>若 H1 成立，可进入“热点 expert 放置 / 冗余预算”讨论。</li>
+        </ul>
+      </div>
+      <div class="footer">
+        <div>PROJECT / TECHNOLOGY REVIEW</div>
+        <div class="center">Internal Technical Analysis</div>
+        <div class="right">Page 7</div>
+      </div>
+    </section>
+
+    <!-- Slide 8 -->
+    <section class="slide" data-page="8">
+      <div class="title-bar">
+        <h1>跨 Benchmark 差异：任务域改变 Expert 热点集合</h1>
+        <div class="subtitle">数据来源：`analysis/pairwise.csv`，仅 decode 相位</div>
+      </div>
+      <div class="content grid-2">
+        <div class="module">
+          <h2>成对比较（Decode）</h2>
+          <table>
+            <tr><th>A</th><th>B</th><th>Mean layer JSD</th><th>Global JSD</th><th>Top-20% Jaccard</th><th>解读</th></tr>
+            <tr>
+              <td>MMLU-Pro</td><td>SWE-bench</td>
+              <td><span class="placeholder">{{JSD_MMLU_SWEB}}</span></td>
+              <td><span class="placeholder">{{GJSD_MMLU_SWEB}}</span></td>
+              <td><span class="placeholder">{{JAC_MMLU_SWEB}}</span></td>
+              <td><span class="placeholder">{{NOTE_MMLU_SWEB}}</span></td>
+            </tr>
+            <tr>
+              <td>MMLU-Pro</td><td>LiveCodeBench</td>
+              <td><span class="placeholder">{{JSD_MMLU_LCB}}</span></td>
+              <td><span class="placeholder">{{GJSD_MMLU_LCB}}</span></td>
+              <td><span class="placeholder">{{JAC_MMLU_LCB}}</span></td>
+              <td><span class="placeholder">{{NOTE_MMLU_LCB}}</span></td>
+            </tr>
+            <tr>
+              <td>SWE-bench</td><td>LiveCodeBench</td>
+              <td><span class="placeholder">{{JSD_SWEB_LCB}}</span></td>
+              <td><span class="placeholder">{{GJSD_SWEB_LCB}}</span></td>
+              <td><span class="placeholder">{{JAC_SWEB_LCB}}</span></td>
+              <td><span class="placeholder">{{NOTE_SWEB_LCB}}</span></td>
+            </tr>
+            <tr>
+              <td>LiveCodeBench</td><td>RULER-NIAH</td>
+              <td><span class="placeholder">{{JSD_LCB_RULER}}</span></td>
+              <td><span class="placeholder">{{GJSD_LCB_RULER}}</span></td>
+              <td><span class="placeholder">{{JAC_LCB_RULER}}</span></td>
+              <td><span class="placeholder">{{NOTE_LCB_RULER}}</span></td>
+            </tr>
+          </table>
+        </div>
+        <div class="module gray">
+          <h2>如何解读</h2>
+          <ul>
+            <li><strong>JSD</strong>：0 表示分布相同，越接近 1 差异越大（单位 bits）。</li>
+            <li><strong>Top-20% Jaccard</strong>：热点 expert 集合重叠度；越低说明任务域迁移越强。</li>
+            <li>若 MMLU 与 LCB 的 Jaccard 高，说明知识题与代码题共享一部分热点 expert。</li>
+            <li>若 RULER 与其他任务 JSD 高，说明长上下文检索路由更独立。</li>
+          </ul>
+          <h3>工程判断（待填）</h3>
+          <ol class="bullets-compact">
+            <li>最相似任务对：<span class="placeholder">{{MOST_SIMILAR_PAIR}}</span></li>
+            <li>最差异任务对：<span class="placeholder">{{MOST_DIFFERENT_PAIR}}</span></li>
+            <li>是否支持 H2：<span class="placeholder">{{H2_VERDICT}}</span></li>
+          </ol>
+        </div>
+      </div>
+      <div class="summary-bar">
+        <div class="label">总结</div>
+        <ul>
+          <li>集中度回答“热不热”，JSD/Jaccard 回答“热点是否随任务变”。</li>
+          <li>如果热点不稳定，静态放置策略需要按任务簇分 profile。</li>
+          <li>SWE-bench 含 system prompt，解释差异时建议单独标注。</li>
+        </ul>
+      </div>
+      <div class="footer">
+        <div>PROJECT / TECHNOLOGY REVIEW</div>
+        <div class="center">Internal Technical Analysis</div>
+        <div class="right">Page 8</div>
+      </div>
+    </section>
+
+    <!-- Slide 9 -->
+    <section class="slide" data-page="9">
+      <div class="title-bar">
+        <h1>风险与局限：Decode-Trusted 结论可汇报，但还不能直接指导 Full-Sequence 放置</h1>
+        <div class="subtitle">明确交付边界，避免过度解读</div>
+      </div>
+      <div class="content grid-2">
+        <div class="module">
+          <h2>数据质量与代表性风险</h2>
+          <table>
+            <tr><th>风险项</th><th>现状</th><th>影响</th><th>缓解</th></tr>
+            <tr>
+              <td>Prefill 路由不可信</td>
+              <td class="risk">TP-split 污染</td>
+              <td>total 相位误导</td>
+              <td>只报 decode；二期修 v9+ prefill</td>
+            </tr>
+            <tr>
+              <td>样本规模有限</td>
+              <td><span class="placeholder">{{MAX_REQUESTS}}</span> req/benchmark</td>
+              <td>统计波动</td>
+              <td>扩到 50 条/full workload</td>
+            </tr>
+            <tr>
+              <td>Decode 长度偏短</td>
+              <td>曾用 128 tokens</td>
+              <td>CoT 未充分展开</td>
+              <td>提升到 1024/2048 并重跑</td>
+            </tr>
+            <tr>
+              <td>ignore_eos=true</td>
+              <td>脚本默认开启</td>
+              <td>与自然停词行为不一致</td>
+              <td>后续改为 false 做对照</td>
+            </tr>
+          </table>
+        </div>
+        <div class="module green">
+          <h2>指标使用边界</h2>
+          <ul>
+            <li><span class="highlight">可用于汇报：</span>decode 相位热点集中度、跨 benchmark 差异趋势。</li>
+            <li><span class="risk">暂不可用：</span>prefill 相位、total 相位、端到端 SLA 推导。</li>
+            <li>Expert ID 在不同层不是同一权重，pooled expert-ID 指标仅作诊断。</li>
+            <li>本实验未开启 EPLB / 动态负载均衡，测的是基线路由偏斜。</li>
+          </ul>
+          <h3>建议补充实验</h3>
+          <ol class="bullets-compact">
+            <li>扩大样本量到每类 50 条，观察集中度是否稳定。</li>
+            <li>对比不同 max_tokens（128 vs 1024）对 decode 热点的影响。</li>
+            <li>若 prefill 修复，补做 total-phase 与 decode-phase 一致性分析。</li>
+          </ol>
+        </div>
+      </div>
+      <div class="summary-bar">
+        <div class="label">总结</div>
+        <ul>
+          <li>当前结论适合作为“生成阶段 expert 负载基线”。</li>
+          <li>不宜直接外推到完整上下文预填充阶段的 HBM 策略。</li>
+          <li>汇报时应把局限写成正式合同，而不是隐藏 caveat。</li>
+        </ul>
+      </div>
+      <div class="footer">
+        <div>PROJECT / TECHNOLOGY REVIEW</div>
+        <div class="center">Internal Technical Analysis</div>
+        <div class="right">Page 9</div>
+      </div>
+    </section>
+
+    <!-- Slide 10 -->
+    <section class="slide" data-page="10">
+      <div class="title-bar">
+        <h1>结论与建议：基于 Decode 相位建立 DeepSeek Expert 负载基线</h1>
+        <div class="subtitle">现状 / 问题 / 建议 / 预期收益</div>
+      </div>
+      <div class="content grid-2">
+        <div class="module">
+          <h2>现状</h2>
+          <ul class="bullets-compact">
+            <li>已在 Ascend 910B1×8 上跑通 DeepSeek-V4 W8A8 路由采集与四类 benchmark。</li>
+            <li>Decode 路由通过唯一性校验，形成可分析的 aggregate / report 产物。</li>
+            <li>主命题验证结果：<span class="placeholder">{{H1_VERDICT}}</span></li>
+          </ul>
+          <h2>问题</h2>
+          <ul class="bullets-compact">
+            <li>Prefill 在 TP=8 下仍不可信，total 相位不能用于正式结论。</li>
+            <li>当前样本规模与 decode 长度可能不足以覆盖长 CoT 场景。</li>
+          </ul>
+        </div>
+        <div class="module gray">
+          <h2>建议</h2>
+          <ol>
+            <li><span class="highlight">短期：</span>以 decode 相位作为 expert load 基线，完成汇报与内部评审。</li>
+            <li><span class="highlight">中期：</span>扩 benchmark 到 50 条/类，并将 max_tokens 提升到 1024+。</li>
+            <li><span class="highlight">长期：</span>继续修 prefill capture（v9+），补 total-phase 分析。</li>
+            <li>若热点集中成立，评估静态热点 expert 放置、冗余副本和 EPLB 配置。</li>
+          </ol>
+          <h2>预期收益</h2>
+          <ul class="bullets-compact">
+            <li>为 MoE 部署提供任务域相关的 expert 负载画像。</li>
+            <li>支撑“20% expert / 90% load”是否成立的工程判断。</li>
+            <li>为后续 Ascend 上 expert parallel / 内存优化提供数据依据。</li>
+          </ul>
+        </div>
+      </div>
+      <div class="summary-bar">
+        <div class="label">总结</div>
+        <ul>
+          <li>这次实验已经能回答：<strong>生成阶段 expert 是否高度集中、不同 benchmark 是否路由不同</strong>。</li>
+          <li>汇报时只引用 decode 指标，并明确 prefill 尚未修复。</li>
+          <li>下一步优先扩样本与加长 decode，而不是等待 prefill 完美后再汇报。</li>
+        </ul>
+      </div>
+      <div class="footer">
+        <div>PROJECT / TECHNOLOGY REVIEW</div>
+        <div class="center">Internal Technical Analysis</div>
+        <div class="right">Page 10</div>
+      </div>
+    </section>
+
+  </div>
+
+  <div class="nav-hint">← → 翻页 · F 全屏 · Ctrl/Cmd+P 导出 PDF</div>
+
+  <script>
+    const slides = [...document.querySelectorAll(".slide")];
+    let index = 0;
+
+    function fitSlide() {
+      const slide = slides[index];
+      if (!slide) return;
+      const scale = Math.min(
+        window.innerWidth / 1280,
+        window.innerHeight / 720,
+        1
+      );
+      slides.forEach(s => { s.style.transform = `scale(${scale})`; });
+    }
+
+    function show(i) {
+      index = (i + slides.length) % slides.length;
+      slides.forEach((s, n) => s.classList.toggle("active", n === index));
+      fitSlide();
+    }
+
+    window.addEventListener("resize", fitSlide);
+    window.addEventListener("keydown", (e) => {
+      if (e.key === "ArrowRight" || e.key === "PageDown" || e.key === " ") show(index + 1);
+      if (e.key === "ArrowLeft" || e.key === "PageUp") show(index - 1);
+      if (e.key.toLowerCase() === "f") {
+        if (!document.fullscreenElement) document.documentElement.requestFullscreen();
+        else document.exitFullscreen();
+      }
+    });
+
+    fitSlide();
+  </script>
+</body>
+</html>
